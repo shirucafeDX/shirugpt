@@ -55,6 +55,7 @@ class QueryRun:
     notes: list[str] = field(default_factory=list)
     truncated: bool = False
     purpose: str = ""
+    result_role: str = "answer"
 
 
 def _flatten_schema(

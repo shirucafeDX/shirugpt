@@ -30,6 +30,7 @@ from src.bq_tools import (
     technical_detail,
 )
 from src.charts import KIND_LABELS, ChartSpec, suggest_chart
+from src.presentation import choose_presentation
 from src.config import (
     DEFAULT_MONTHLY_LIMIT_USD,
     ConfigError,
@@ -316,43 +317,52 @@ def render_chart(df, spec: ChartSpec, key_prefix: str) -> None:
     except Exception:  # noqa: BLE001 - 描画不能な組み合わせは表にフォールバック
         st.warning(
             "この列の組み合わせではグラフを描画できませんでした。"
-            "軸の指定を変えるか「表」タブをご覧ください。"
+            "軸の指定を変えるか「データを見る」を開いてください。"
         )
         return
     if spec.reason:
         st.caption(spec.reason)
 
 
-def render_run(run: QueryRun, idx: int, msg_idx: int) -> None:
-    rows = len(run.dataframe)
-    label = f"実行した SQL — {run.purpose}" if run.purpose else "実行した SQL"
-    with st.expander(label):
-        st.code(run.sql, language="sql")
-        for note in run.notes:
-            st.caption(f"ℹ️ {note}")
-        if run.billed_bytes:
-            st.caption(
-                f"実行クエリ量: {human_bytes(run.billed_bytes)}\n"
-                f"結果件数: {rows:,} 件"
-            )
-
-    if not rows:
-        st.info("このクエリの結果は 0 件でした。")
+def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> None:
+    runs = message.get("runs") or []
+    if not runs:
         return
+    plan = choose_presentation(message.get("question", ""), runs, shown)
+    if message.get("is_error"):
+        plan.mode = "none"
+    if plan.mode == "table":
+        if plan.note:
+            st.caption(plan.note)
+        render_table(runs[plan.index], plan.index, msg_idx)
+    elif plan.mode == "chart":
+        render_chart(plan.dataframe, plan.chart, f"chart_{msg_idx}_{plan.index}")
+        if plan.note:
+            st.caption(plan.note)
+    if plan.mode != "none":
+        shown.add(plan.signature)
 
-    spec = suggest_chart(run.dataframe)
-    if spec is None:
-        render_table(run, idx, msg_idx)
-        return
+    # 回答に使った結果と途中結果を、必要なときだけ確認できるようにする。
+    hidden = [(i, run) for i, run in enumerate(runs)
+              if not (plan.mode == "table" and i == plan.index)]
+    if hidden:
+        with st.expander("データを見る"):
+            for idx, run in hidden:
+                st.caption(run.purpose or f"結果 {idx + 1}")
+                if run.dataframe.empty:
+                    st.info("このクエリの結果は 0 件でした。")
+                else:
+                    render_table(run, idx, msg_idx)
+    with st.expander("実行詳細"):
+        for idx, run in enumerate(runs):
+            st.caption(run.purpose or f"クエリ {idx + 1}")
+            st.code(run.sql, language="sql")
+            st.caption(f"実行クエリ量: {human_bytes(run.billed_bytes)} · 結果件数: {len(run.dataframe):,} 件")
+            for note in run.notes:
+                st.caption(f"ℹ️ {note}")
 
-    tab_chart, tab_table = st.tabs(["グラフ", "表"])
-    with tab_chart:
-        render_chart(run.dataframe, spec, f"chart_{msg_idx}_{idx}")
-    with tab_table:
-        render_table(run, idx, msg_idx)
 
-
-def render_message(message: dict[str, Any], msg_idx: int) -> None:
+def render_message(message: dict[str, Any], msg_idx: int, shown: set[str] | None = None) -> None:
     with st.chat_message(message["role"]):
         if message.get("is_error"):
             st.warning(message["text"])
@@ -364,9 +374,7 @@ def render_message(message: dict[str, Any], msg_idx: int) -> None:
             with st.expander(f"診断情報（{len(errors)} 件）"):
                 for err in errors:
                     st.code(err)
-
-        for idx, run in enumerate(message.get("runs") or []):
-            render_run(run, idx, msg_idx)
+        render_results(message, msg_idx, shown if shown is not None else set())
 
 
 def render_sidebar(
@@ -427,6 +435,7 @@ def render_sidebar(
 # ターン処理
 # --------------------------------------------------------------------
 def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
+    question = next((m["text"] for m in reversed(st.session_state.messages) if m["role"] == "user"), "")
     try:
         result = agent.run(st.session_state.contents, ctx)
         if isinstance(result, ConfirmationPending):
@@ -437,6 +446,7 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
                 {
                     "role": "assistant",
                     "text": result.text,
+                    "question": question,
                     "runs": list(ctx.turn_runs),
                     "errors": list(ctx.turn_errors),
                 }
@@ -464,6 +474,7 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
             {
                 "role": "assistant",
                 "text": friendly_error(exc),
+                "question": question,
                 "runs": list(ctx.turn_runs),
                 "errors": list(ctx.turn_errors),
                 "is_error": True,
@@ -524,8 +535,9 @@ def render_chat_page(
         settings, ctx, tools, usage_logger, user_email, monthly_used_usd, monthly_limit_usd
     )
 
+    shown: set[str] = set()
     for msg_idx, message in enumerate(st.session_state.messages):
-        render_message(message, msg_idx)
+        render_message(message, msg_idx, shown)
 
     pending = st.session_state.pending
     if pending is not None:
@@ -628,4 +640,5 @@ def main() -> None:
         render_chat_page(settings, tools, agent, usage_logger, user_email)
 
 
-main()
+if __name__ == "__main__":
+    main()

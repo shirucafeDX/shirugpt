@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -80,6 +80,12 @@ run_query が error を返したら、内容を読んで SQL を修正し、最�
 スキャン量が大きすぎると言われた場合は、期間を絞る・列を減らす・集計に変えるなどして作り直す。
 
 ## 回答スタイル
+- 結論を文章で先に示す。単一の数値・少数の比較は数値と差分を文章で説明する。
+- 図表は画面側が質問と結果から選ぶ。表を明示的に求められていない限り、
+  回答本文に Markdown の表を重ねて書かない。SQL や調査途中の結果も本文に列挙しない。
+- run_query の result_role は、探索・検証・途中計算なら supporting、
+  質問の結論に使う結果なら answer を指定する。画面は最後の answer のみを表示候補にする。
+  推移・分布・比較の回答用クエリは、必要な系列を1つの結果にまとめる。
 - 日本語で、データにない内容を推測で補わない。
 - 質問の種類によって長さを変える。
   - 件数・合計・単純な集計結果など「事実を聞かれただけ」の質問には、
@@ -228,6 +234,11 @@ def build_declarations() -> list[types.FunctionDeclaration]:
                         type=types.Type.STRING,
                         description="このクエリで何を確認したいかの短い説明（日本語）",
                     ),
+                    "result_role": types.Schema(
+                        type=types.Type.STRING,
+                        enum=["supporting", "answer"],
+                        description="探索・検証・途中計算は supporting、結論に使う最終結果は answer。省略時は answer。",
+                    ),
                 },
                 required=["sql"],
             ),
@@ -307,10 +318,16 @@ class GeminiAgent:
             raise BQToolError("sql が指定されていません。")
 
         key = _sql_key(sql)
+        result_role = str(args.get("result_role", "answer"))
+        if result_role not in ("supporting", "answer"):
+            raise BQToolError("result_role は supporting または answer を指定してください。")
 
-        # 同一 SQL の再実行を防ぐ（再課金と重複表示の回避）
+        # 同一 SQL の再実行・再課金を防ぐ。再表示の要否は UI で決める。
         if key in ctx.query_cache:
             run = ctx.query_cache[key]
+            # 図表だけを求める追質問にも対応する。履歴内の結果は書き換えない。
+            ctx.turn_runs = [r for r in ctx.turn_runs if _sql_key(r.original_sql) != key]
+            ctx.turn_runs.append(replace(run, result_role=result_role))
             payload = self._query_payload(run)
             payload["cached"] = True
             return payload
@@ -331,6 +348,7 @@ class GeminiAgent:
         except ConfirmationRequired as need:
             raise _Pending(key, need) from None
 
+        run.result_role = result_role
         ctx.query_cache[key] = run
         ctx.turn_runs.append(run)
         ctx.session_billed_bytes += run.billed_bytes
