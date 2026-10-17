@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field, replace
@@ -101,7 +102,7 @@ run_query が error を返したら、内容を読んで SQL を修正し、最�
 
 
 def _sql_key(sql: str) -> str:
-    return hashlib.sha256(" ".join(sql.split()).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(sql.strip().encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -119,6 +120,10 @@ class ToolContext:
     # 直近ターンの記録（UI 表示用）
     turn_runs: list[QueryRun] = field(default_factory=list)
     turn_errors: list[str] = field(default_factory=list)
+    turn_prompt_tokens: int = 0
+    turn_output_tokens: int = 0
+    turn_thinking_tokens: int = 0
+    turn_total_tokens: int = 0
 
     # セッション全体の累計（サイドバー表示用）
     session_prompt_tokens: int = 0
@@ -144,6 +149,10 @@ class ToolContext:
     def start_turn(self) -> None:
         self.turn_runs = []
         self.turn_errors = []
+        self.turn_prompt_tokens = 0
+        self.turn_output_tokens = 0
+        self.turn_thinking_tokens = 0
+        self.turn_total_tokens = 0
         self.turn_id = uuid.uuid4().hex
 
 
@@ -427,6 +436,48 @@ class GeminiAgent:
             lines.append(f"詳細: {detail}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _answer(contents: list[types.Content], text: str,
+                content: types.Content | None = None) -> AnswerResult:
+        # UI だけでなく、次の API 呼び出しにも最終回答を引き継ぐ。
+        # 元の Content を使うことで thought signature も保持する。
+        contents.append(content if content is not None else types.Content(
+            role="model", parts=[types.Part.from_text(text=text)]
+        ))
+        return AnswerResult(text)
+
+    @staticmethod
+    def _record_generation_issue(ctx: ToolContext, source: str, detail: str,
+                                 response: Any = None, reason: str | None = None) -> None:
+        usage = getattr(response, "usage_metadata", None)
+        candidate = (getattr(response, "candidates", None) or [None])[0]
+        diagnostics = {
+            "detail": detail,
+            "token_scope": "response",
+            "finish_reason": reason,
+            "finish_message": getattr(candidate, "finish_message", None),
+            "prompt_feedback": repr(getattr(response, "prompt_feedback", None)),
+            "prompt_tokens": getattr(usage, "prompt_token_count", None),
+            "output_tokens": ((usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0)) if usage else None,
+            "thinking_tokens": getattr(usage, "thoughts_token_count", None),
+            "total_tokens": getattr(usage, "total_token_count", None),
+        }
+        if response is None:
+            diagnostics.update(
+                token_scope="turn", prompt_tokens=ctx.turn_prompt_tokens,
+                output_tokens=ctx.turn_output_tokens, thinking_tokens=ctx.turn_thinking_tokens,
+                total_tokens=ctx.turn_total_tokens,
+            )
+        encoded = json.dumps(diagnostics, ensure_ascii=False)
+        logger.warning("%s: %s", source, encoded)
+        ctx.turn_errors.append(encoded)
+        if ctx.usage_logger is not None:
+            # トークンは診断用 JSON 内のみ。課金用の列には二重計上しない。
+            ctx.usage_logger.log_error(
+                user_email=ctx.user_email, session_id=ctx.session_id,
+                turn_id=ctx.turn_id, error_source=source, error_text=encoded,
+            )
+
     # -- ループ本体 ---------------------------------------------------
     def run(
         self, contents: list[types.Content], ctx: ToolContext
@@ -462,6 +513,10 @@ class GeminiAgent:
                     # thinking_tokens で内訳を別途残す）
                     output_tokens = (usage.candidates_token_count or 0) + thinking_tokens
                     total_tokens = usage.total_token_count or 0
+                    ctx.turn_prompt_tokens += prompt_tokens
+                    ctx.turn_output_tokens += output_tokens
+                    ctx.turn_thinking_tokens += thinking_tokens
+                    ctx.turn_total_tokens += total_tokens
                     ctx.session_prompt_tokens += prompt_tokens
                     ctx.session_output_tokens += output_tokens
                     ctx.session_total_tokens += total_tokens
@@ -476,43 +531,45 @@ class GeminiAgent:
                             thinking_tokens=thinking_tokens,
                         )
                 candidate = (response.candidates or [None])[0]
+                reason_value = getattr(candidate, "finish_reason", None)
+                reason = getattr(reason_value, "value", str(reason_value)) if reason_value else None
                 if candidate is None or candidate.content is None:
-                    detail = f"candidate なし: prompt_feedback={response.prompt_feedback!r}"
-                    logger.warning(detail)
-                    ctx.turn_errors.append(detail)
-                    return AnswerResult(
+                    source = "output_limit" if reason == "MAX_TOKENS" else "missing_candidate"
+                    self._record_generation_issue(ctx, source, "有効な candidate/content がありません。", response, reason)
+                    message = (
+                        "出力トークン上限に達して回答が打ち切られました。質問をもう少し絞ってお試しください。"
+                        if source == "output_limit" else
                         "モデルから有効な応答が得られませんでした。質問を言い換えてお試しください。"
                     )
+                    return self._answer(contents, message)
 
                 parts = candidate.content.parts or []
                 calls = [p.function_call for p in parts if p.function_call]
-                text = "".join(p.text for p in parts if p.text)
+                text = "".join(p.text for p in parts if p.text and not p.thought)
+                abnormal = reason not in (None, "STOP", "FINISH_REASON_UNSPECIFIED")
+                if abnormal:
+                    source = "output_limit" if reason == "MAX_TOKENS" else "model_response_error"
+                    self._record_generation_issue(ctx, source, "モデルが正常終了しませんでした。", response, reason)
+                    # 不完全な function_call は実行しない。
+                    if reason == "MAX_TOKENS" and text:
+                        message = text + "\n\n※ 出力トークン上限に達したため、回答は途中で打ち切られています。"
+                        content = candidate.content.model_copy(update={
+                            "parts": [*[p for p in parts if not p.function_call], types.Part.from_text(text="出力トークン上限に達したため、回答は途中で打ち切られています。")]
+                        })
+                        return self._answer(contents, message, content)
+                    message = (
+                        "出力トークン上限に達して回答が打ち切られました。質問をもう少し絞ってお試しください。"
+                        if reason == "MAX_TOKENS" else
+                        "モデルの応答を正常に受け取れませんでした。質問を言い換えてお試しください。"
+                    )
+                    return self._answer(contents, message)
 
                 if not calls:
-                    if not text and str(candidate.finish_reason).endswith("MAX_TOKENS"):
-                        return AnswerResult(
-                            "回答が長くなりすぎて途中で打ち切られました。"
-                            "質問をもう少し絞ってお試しください。"
-                        )
                     if not text:
-                        detail = (
-                            f"text も function_call も返りませんでした: "
-                            f"finish_reason={candidate.finish_reason} "
-                            f"finish_message={candidate.finish_message!r} "
-                            f"safety_ratings={candidate.safety_ratings!r}"
-                        )
-                        logger.warning("%s parts=%r", detail, parts)
-                        ctx.turn_errors.append(detail)
-                        if ctx.usage_logger is not None:
-                            ctx.usage_logger.log_error(
-                                user_email=ctx.user_email,
-                                session_id=ctx.session_id,
-                                turn_id=ctx.turn_id,
-                                error_source="empty_response",
-                                error_text=detail,
-                            )
-                    return AnswerResult(
-                        text or "回答を生成できませんでした。質問を言い換えてお試しください。"
+                        self._record_generation_issue(ctx, "empty_response", "text も function_call も返りませんでした。", response, reason)
+                    return self._answer(
+                        contents, text or "回答を生成できませんでした。質問を言い換えてお試しください。",
+                        candidate.content if text else None,
                     )
 
                 contents.append(candidate.content)
@@ -534,7 +591,12 @@ class GeminiAgent:
             contents.append(types.Content(role="user", parts=responses))
             pending_calls = None
 
-        return AnswerResult(
+        self._record_generation_issue(
+            ctx, "iteration_limit",
+            f"調査ループが上限 {self.settings.max_tool_iterations} 回に達しました。",
+            reason="MAX_TOOL_ITERATIONS",
+        )
+        return self._answer(contents,
             "調査の手順が想定より多くなったため、途中で打ち切りました。"
             "質問をもう少し具体的にしていただけますか。"
         )

@@ -118,6 +118,19 @@ Gemini トークン代 + BigQuery クエリ代の合計です。`MonthlyUsage.co
 - 利用者ごとの月次上限(USD)、最終更新日時の一覧
 - 全員一括設定・個別編集・保存
 
+**実行設定タブ**（読み取り専用）
+- 起動時に読み込まれたモデル・思考予算・サンプル行数・クエリ上限などを表示
+- 利用ログが無効でも管理者は確認可能。鍵・認証ファイルパス・管理者メールは表示しない
+- 環境変数や Secrets を変更した場合は、再起動後の適用値をここで確認
+
+生成終了時の診断は `error_text` に JSON で保存します。従来のテキストログもそのまま残ります。
+`error_source` は空応答の `empty_response` に加え、`missing_candidate`、
+`output_limit`、`iteration_limit`、`model_response_error` を記録します。
+JSON には `finish_reason`、`finish_message`、トークン内訳、`token_scope`（response / turn）を含みます。
+API が使用量を返さない場合、その呼び出しの内訳は null です。
+トークンは診断用 JSON に入れ、課金集計用の列には重複記録しません。
+既存の BigQuery テーブルへのカラム追加は不要です。
+
 ### BigQuery を直接見ないとわからないもの
 
 | データ | テーブル | 管理者ページに出ない理由 |

@@ -6,13 +6,17 @@
   3. 外側に LIMIT が無ければ自動付与し、その事実を呼び出し元に返す
 
 日本語のデータセット名・テーブル名・列名（バッククォート囲み）を壊さないよう、
-文字列リテラルとバッククォート識別子を認識するスキャナで前処理してから解析する。
+キーワード検査用のスキャナと、BigQuery 方言の構文木で検査する。
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+
+import sqlglot
+from sqlglot import exp
+from sqlglot.errors import SqlglotError
 
 # 単独ステートメントとして現れたら危険なキーワード。
 # 文字列リテラルとバッククォート識別子はマスク済みの文字列に対して探す。
@@ -32,18 +36,6 @@ _FORBIDDEN = (
 
 _ALLOWED_STARTS = ("SELECT", "WITH")
 
-# FROM / JOIN の直後に来るテーブルパス
-_IDENT = r"(?:`[^`]+`|[^\s,()`;.]+)"
-_REF_RE = re.compile(
-    rf"(?is)\b(?:FROM|JOIN)\s+({_IDENT}(?:\s*\.\s*{_IDENT})*)"
-)
-
-# バッククォート内にドットを含むもの（`proj.dataset.table` 形式）
-_BACKTICK_RE = re.compile(r"`([^`]+)`")
-
-_CTE_RE = re.compile(rf"(?is)(?:\bWITH\b|,)\s*({_IDENT})\s+AS\s*\(")
-
-_TRAILING_LIMIT_RE = re.compile(r"(?is)\bLIMIT\s+\d+\s*(?:OFFSET\s+\d+\s*)?$")
 _AGGREGATE_RE = re.compile(
     r"(?is)\b(?:GROUP\s+BY|COUNT\s*\(|SUM\s*\(|AVG\s*\(|MIN\s*\(|MAX\s*\("
     r"|ARRAY_AGG\s*\(|STRING_AGG\s*\(|APPROX_COUNT_DISTINCT\s*\()"
@@ -138,10 +130,6 @@ def _split_path(raw: str) -> list[str]:
     return [part for part in cleaned.split(".") if part]
 
 
-def _collect_cte_names(masked: str) -> set[str]:
-    return {_split_path(m.group(1))[0].lower() for m in _CTE_RE.finditer(masked) if _split_path(m.group(1))}
-
-
 def check_sql(
     sql: str,
     *,
@@ -158,8 +146,6 @@ def check_sql(
 
     # キーワード判定用（文字列・識別子ともにマスク）
     kw_masked = _scan(body, mask_backticks=True)
-    # 参照テーブル抽出用（バッククォートの中身は保持）
-    ref_masked = _scan(body, mask_backticks=False)
 
     if not kw_masked.strip():
         raise SQLGuardError("SQL にコメント以外の内容がありません。")
@@ -189,7 +175,15 @@ def check_sql(
 
     # --- 参照テーブルの allowlist 検証 ----------------------------
     allowed = tuple(allowed_datasets)
-    cte_names = _collect_cte_names(ref_masked)
+    try:
+        statements = [node for node in sqlglot.parse(body, read="bigquery") if node is not None]
+    except SqlglotError as exc:
+        raise SQLGuardError(f"SQL を解析できません。構文を確認してください: {exc}") from exc
+    if len(statements) != 1:
+        raise SQLGuardError("SELECT 文を1つだけ指定してください。")
+    tree = statements[0]
+    if not isinstance(tree, (exp.Select, exp.SetOperation, exp.Subquery)) or tree.find(exp.Into):
+        raise SQLGuardError("読み取り専用の SELECT クエリのみ実行できます。")
     referenced: list[str] = []
 
     def validate(parts: list[str], raw: str) -> None:
@@ -214,22 +208,24 @@ def check_sql(
         if full not in referenced:
             referenced.append(full)
 
-    for match in _REF_RE.finditer(ref_masked):
-        raw = match.group(1)
-        # 関数呼び出し（UNNEST など）は対象外
-        tail = ref_masked[match.end() : match.end() + 1]
-        if tail == "(":
-            continue
-        parts = _split_path(raw)
-        if len(parts) == 1 and parts[0].lower() in cte_names:
-            continue
-        validate(parts, raw)
+    # 列・別名・コメント・文字列は Table ノードに含まれない。
+    # CTE の定義内、カンマ区切りの結合、UNION 内もすべて検査する。
+    for table in tree.find_all(exp.Table):
+        if not isinstance(table.this, exp.Identifier):
+            raise SQLGuardError("テーブル関数の参照先を検証できないため実行できません。")
+        parts = [part.name for part in table.parts]
+        validate(parts, table.sql(dialect="bigquery"))
 
-    # FROM/JOIN 以外の位置に現れる完全修飾参照も検証する
-    for match in _BACKTICK_RE.finditer(body):
-        parts = _split_path(match.group(1))
+    # 修飾された UDF も allowlist の外へ出さない。SAFE.* は組み込み修飾子。
+    for function in tree.find_all(exp.Anonymous):
+        parts = _split_path(function.name)
+        parent = function.parent
+        if isinstance(parent, exp.Dot) and parent.expression is function:
+            parts = _split_path(parent.this.sql(dialect="bigquery")) + parts
+        if parts and parts[0].upper() == "SAFE":
+            parts = parts[1:]
         if len(parts) >= 2:
-            validate(parts, match.group(1))
+            validate(parts, function.sql(dialect="bigquery"))
 
     # --- LIMIT の自動付与 -----------------------------------------
     notes: list[str] = []
@@ -237,7 +233,7 @@ def check_sql(
     limit_injected = False
     final_sql = body
 
-    if not _TRAILING_LIMIT_RE.search(kw_masked):
+    if tree.args.get("limit") is None:
         final_sql = f"{body}\nLIMIT {default_row_limit}"
         limit_injected = True
         if looks_aggregate:

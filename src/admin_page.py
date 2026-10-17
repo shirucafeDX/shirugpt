@@ -112,18 +112,48 @@ def render_admin_page(settings: Settings, logger: UsageLogger, viewer_email: str
             "この設定を Streamlit Cloud の Secrets に入れないでください。"
         )
 
+    tab_usage, tab_limits, tab_settings = st.tabs(["利用状況", "使用制限", "実行設定"])
+    with tab_settings:
+        _render_settings_tab(settings)
     if not settings.logging_enabled:
-        st.info(
-            "利用ログが無効です。`BQ_LOG_DATASET` を設定すると記録が始まります"
-            "（`BQ_ALLOWED_DATASETS` には含めないでください）。"
-        )
+        with tab_usage:
+            st.info("利用ログが無効です。BQ_LOG_DATASET を設定すると記録が始まります。")
+        with tab_limits:
+            st.info("使用制限を管理するには利用ログの設定が必要です。")
         return
 
-    tab_usage, tab_limits = st.tabs(["利用状況", "使用制限"])
     with tab_usage:
         _render_usage_tab(logger)
     with tab_limits:
         _render_limits_tab(logger)
+
+
+def _render_settings_tab(settings: Settings) -> None:
+    st.subheader("現在適用中の設定")
+    st.caption("起動時に読み込んだ設定です。環境変数や Secrets の変更後はアプリを再起動してください。")
+    thinking = (
+        "未指定（モデル既定）" if settings.thinking_budget is None else
+        "動的（-1）" if settings.thinking_budget == -1 else
+        "無効（0）" if settings.thinking_budget == 0 else
+        f"{settings.thinking_budget:,} トークン／呼び出し"
+    )
+    # 認証キー・パス・管理者メール等を誤って表示しないよう、明示した項目だけを使う。
+    rows = [
+        ("モデル", settings.gemini_model),
+        ("Gemini リージョン", settings.vertex_location),
+        ("思考トークン予算", thinking),
+        ("出力トークン上限", "未指定（モデル既定）"),
+        ("Gemini に渡すサンプル行数", f"{settings.sample_rows:,} 行"),
+        ("調査ループ上限", f"{settings.max_tool_iterations:,} 回／処理"),
+        ("BigQuery 実行前の確認基準", human_bytes(settings.dry_run_confirm_bytes)),
+        ("BigQuery 課金対象量上限", human_bytes(settings.max_bytes_billed)),
+        ("SQL の既定行数", f"{settings.default_row_limit:,} 行"),
+        ("最大読込行数", f"{settings.max_result_rows:,} 行"),
+        ("月次利用上限の既定値", f"${DEFAULT_MONTHLY_LIMIT_USD:.2f}／人（個別設定を優先）"),
+        ("利用ログ", "有効" if settings.logging_enabled else "無効"),
+    ]
+    st.dataframe(pd.DataFrame(rows, columns=["設定項目", "適用値"]),
+                 width="stretch", hide_index=True)
 
 
 def _render_usage_tab(logger: UsageLogger) -> None:
