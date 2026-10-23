@@ -84,6 +84,7 @@ class Settings:
     prompt_log_table: str
     admin_emails: tuple[str, ...]
     admin_allow_local: bool
+    chat_history_bucket: str = ""
 
     def is_dataset_allowed(self, dataset: str) -> bool:
         return dataset in self.allowed_datasets
@@ -181,6 +182,7 @@ def load_settings() -> Settings:
         prompt_log_table=_str("BQ_PROMPT_LOG_TABLE", "prompt_logs"),
         admin_emails=_csv("ADMIN_EMAILS"),
         admin_allow_local=_bool("ADMIN_ALLOW_LOCAL"),
+        chat_history_bucket=_str("CHAT_HISTORY_BUCKET"),
     )
 
 

@@ -230,6 +230,29 @@ cp .env.example .env
 
 ## 6. 起動
 
+### チャット履歴を有効にする場合
+
+1. 非公開の Cloud Storage バケットを作成します。Standard、均一なバケットレベル
+   アクセス、公開アクセス防止を有効にします。自動削除ルール・保持ロックは不要です。
+2. アプリが使用するサービスアカウントに、そのバケットの
+   `roles/storage.objectUser` を付与します。バケット全体の管理者権限は不要です。
+3. `.env` または Streamlit Cloud の Secrets のトップレベルに設定を追加します。
+
+   ```toml
+   CHAT_HISTORY_BUCKET = "shirugpt-history"
+   ```
+
+4. `requirements.txt` の依存パッケージをインストールしてアプリを再起動します。
+   Streamlit Cloud では既存の `gcp_service_account` 認証を再利用します。
+
+未設定または空なら履歴保存は無効です。利用には Google OIDC ログインが必要で、
+アプリはログイン済み本人のメールアドレスから履歴の保存領域を決めます。
+ローカルの ADC で検証する場合は、ADC の利用者にも同じバケット権限を付与します。
+ローカルで Google ログインも設定しなければ、通常のチャットは使えますが履歴は保存しません。
+
+バケットへの保存は利用量ログとは別で、保存する内容には質問・回答・SQL・結果データが
+含まれます。Soft Delete が7日なら、削除後も復元用データが7日間保持されます。
+
 ```bash
 .venv/bin/streamlit run app.py --server.address 127.0.0.1
 ```

@@ -10,6 +10,8 @@ import json
 import logging
 import os
 import tempfile
+import uuid
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import streamlit as st
@@ -42,6 +44,8 @@ from src.config import (
     load_settings,
 )
 from src.usage_log import UsageLogger, jst_month_bounds_utc
+from src.chat_history import HistoryStore, pack, unpack
+from google.api_core.exceptions import PreconditionFailed
 
 st.set_page_config(page_title="ShiruGPT", page_icon="📊", layout="wide")
 
@@ -83,6 +87,7 @@ _SECRET_ENV_KEYS = (
     "BQ_LOG_TABLE",
     "BQ_LIMIT_TABLE",
     "ADMIN_EMAILS",
+    "CHAT_HISTORY_BUCKET",
     # ADMIN_ALLOW_LOCAL は .env 専用（認証を迂回するフラグなので
     # Streamlit Cloud の Secrets からは意図的に読まない）
 )
@@ -176,6 +181,8 @@ def init_state(
     usage_logger: UsageLogger,
     user_email: str,
 ) -> ToolContext:
+    if st.session_state.get("conversation_owner") != user_email:
+        reset_conversation(settings, tools, usage_logger, user_email)
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "contents" not in st.session_state:
@@ -195,10 +202,119 @@ def reset_conversation(
     usage_logger: UsageLogger,
     user_email: str,
 ) -> None:
+    # 会話を切り替えたとき、以前の図表ウィジェットの選択を持ち越さない。
+    for key in list(st.session_state):
+        if key.startswith(("chart_", "dl_")):
+            del st.session_state[key]
     st.session_state.messages = []
     st.session_state.contents = []
     st.session_state.pending = None
     st.session_state.ctx = _new_context(settings, tools, usage_logger, user_email)
+    st.session_state.conversation_owner = user_email
+    st.session_state.history_id = uuid.uuid4().hex
+    st.session_state.history_generation = 0
+    st.session_state.history_dirty = False
+    st.session_state.history_error = ""
+    st.session_state.history_status = "ready"
+    st.session_state.pop("history_entries", None)
+
+
+@st.cache_resource(show_spinner=False)
+def history_store(bucket: str, project: str) -> HistoryStore:
+    return HistoryStore(bucket, project)
+
+
+def save_conversation(ctx: ToolContext, status: str = "ready") -> None:
+    if not ctx.user_email or not ctx.settings.chat_history_bucket:
+        return
+    st.session_state.history_dirty = True
+    st.session_state.history_status = status
+    try:
+        data = pack(st.session_state.messages, st.session_state.contents, ctx,
+                    st.session_state.pending, status)
+        title = next((m["text"] for m in st.session_state.messages if m["role"] == "user"), "会話")
+        generation = history_store(ctx.settings.chat_history_bucket, ctx.settings.gcp_project).save(
+            ctx.user_email, st.session_state.history_id, data, title,
+            st.session_state.history_generation,
+        )
+        st.session_state.history_generation = generation
+        st.session_state.history_dirty = False
+        st.session_state.history_error = ""
+        st.session_state.pop("history_entries", None)
+    except PreconditionFailed:
+        st.session_state.history_error = "別のタブで履歴が更新または削除されました。「別の会話として保存」で現在の内容を残せます。"
+    except Exception:
+        logger.warning("会話履歴の保存に失敗しました。", exc_info=True)
+        st.session_state.history_error = "履歴を保存できませんでした。この画面の会話は保持されています。再保存してください。"
+
+
+def render_history(settings, tools, usage_logger, user_email, ctx) -> None:
+    st.subheader("チャット履歴")
+    if not settings.chat_history_bucket:
+        st.caption("履歴保存は未設定です。")
+        return
+    if not user_email:
+        st.caption("履歴の保存・再開にはログインが必要です。")
+        return
+    store = history_store(settings.chat_history_bucket, settings.gcp_project)
+    if st.session_state.history_error:
+        st.warning(st.session_state.history_error)
+        if st.button("再保存"):
+            save_conversation(ctx, st.session_state.history_status)
+            st.rerun()
+        if st.button("別の会話として保存"):
+            st.session_state.history_id = uuid.uuid4().hex
+            st.session_state.history_generation = 0
+            save_conversation(ctx, st.session_state.history_status)
+            st.rerun()
+    elif st.session_state.messages:
+        st.caption("自動保存済み")
+    if st.button("履歴を更新"):
+        st.session_state.pop("history_entries", None)
+    try:
+        if "history_entries" not in st.session_state:
+            st.session_state.history_entries = store.list(user_email)
+        entries = st.session_state.history_entries
+    except Exception:
+        logger.warning("履歴一覧の取得に失敗しました。", exc_info=True)
+        st.warning("履歴一覧を取得できませんでした。「履歴を更新」で再試行できます。")
+        return
+    if not entries:
+        st.caption("保存された会話はありません。")
+        return
+    by_id = {e["id"]: e for e in entries}
+    selected = st.selectbox(
+        "保存した会話", options=list(by_id),
+        format_func=lambda key: f'{by_id[key]["title"][:40]} · {by_id[key]["updated"].astimezone(ZoneInfo("Asia/Tokyo")).strftime("%m/%d %H:%M")}',
+    )
+    dirty = st.session_state.history_dirty
+    if st.button("この会話を開く", disabled=dirty):
+        try:
+            data, generation = store.load(user_email, selected)
+            new_ctx = _new_context(settings, tools, usage_logger, user_email)
+            messages, contents, pending = unpack(data, new_ctx)
+            reset_conversation(settings, tools, usage_logger, user_email)
+            st.session_state.messages = messages
+            st.session_state.contents = contents
+            st.session_state.pending = pending
+            st.session_state.ctx = new_ctx
+            st.session_state.history_id = selected
+            st.session_state.history_generation = generation
+            st.rerun()
+        except Exception as exc:
+            logger.warning("履歴の復元に失敗しました。", exc_info=True)
+            st.error(str(exc) if isinstance(exc, ValueError) else "会話を開けませんでした。履歴を更新して再試行してください。")
+    confirm_delete = st.checkbox("選択した会話を削除する", key=f"delete_history_{selected}")
+    if st.button("履歴から削除", disabled=not confirm_delete or dirty):
+        try:
+            store.delete(user_email, selected, by_id[selected]["generation"])
+            if selected == st.session_state.history_id:
+                reset_conversation(settings, tools, usage_logger, user_email)
+            st.session_state.pop("history_entries", None)
+            st.rerun()
+        except Exception:
+            logger.warning("履歴の削除に失敗しました。", exc_info=True)
+            st.error("削除できませんでした。履歴を更新して再試行してください。")
 
 
 # --------------------------------------------------------------------
@@ -419,12 +535,14 @@ def render_sidebar(
 - 実行クエリ量合計: **{human_bytes(ctx.session_billed_bytes)}**
 """
         )
-        st.caption("会話をリセットするまでの累計です。")
+        st.caption("この会話の累計です。履歴から再開した場合は以前の利用量を含みます。")
         
         st.divider()
-        if st.button("会話をリセット", width="stretch"):
+        if st.button("新しいチャット", width="stretch", disabled=st.session_state.history_dirty):
             reset_conversation(settings, tools, usage_logger, user_email)
             st.rerun()
+
+        render_history(settings, tools, usage_logger, user_email, ctx)
 
         st.link_button(
             "📝 質問・報告フォーム", FEEDBACK_FORM_URL, width="stretch"
@@ -480,6 +598,7 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
                 "is_error": True,
             }
         )
+    save_conversation(ctx)
     st.rerun()
 
 
@@ -573,6 +692,7 @@ def render_chat_page(
         turn_id=ctx.turn_id,
         prompt_text=prompt,
     )
+    save_conversation(ctx, "running")
 
     with st.chat_message("user"):
         st.markdown(prompt)
