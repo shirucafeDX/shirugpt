@@ -13,7 +13,7 @@ from streamlit.testing.v1 import AppTest
 
 from src.agent import ToolContext, ConfirmationPending, GeminiAgent, _sql_key
 from src.bq_tools import QueryRun
-from src.chat_history import HistoryStore, pack, unpack
+from src.chat_history import HistoryStore, conversation_title, pack, unpack
 from src.usage_log import MonthlyUsage
 
 
@@ -23,6 +23,14 @@ def settings():
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_title_uses_only_first_question_and_fits_one_line(self):
+        self.assertEqual(conversation_title([
+            {'role': 'user', 'text': '  店舗別の\n 来店数を教えて  '},
+            {'role': 'assistant', 'text': '回答'},
+            {'role': 'user', 'text': '次の質問'},
+        ]), '店舗別の 来店数を教えて')
+        self.assertEqual(conversation_title([{'role': 'user', 'text': 'あ' * 60}]), 'あ' * 39 + '…')
+
     def setUp(self):
         self.ctx = ToolContext(tools=Mock(), settings=settings(), user_email='a@example.com')
         self.frame = pd.DataFrame({
@@ -162,6 +170,7 @@ with patch('app.history_store', return_value=store):
         st.session_state.messages = [{'role':'user','text':'未保存の質問'}]
         save_conversation(ctx)
     render_history(s, tools, usage, 'a@example.com', ctx)
+    st.session_state['list_calls'] = st.session_state.get('list_calls', 0) + store.list.call_count
 st.write([m['text'] for m in st.session_state.messages])
 '''
 
@@ -174,8 +183,9 @@ class HistoryUITests(unittest.TestCase):
 
     def test_load_save_and_delete_ui(self):
         app = self.render()
-        next(b for b in app.button if b.label == 'この会話を開く').click().run()
+        next(b for b in app.button if b.label == '保存した質問').click().run()
         self.assertFalse(app.exception)
+        self.assertEqual(app.session_state['list_calls'], 1)
         self.assertEqual(app.session_state['messages'][0]['text'], '保存した質問')
         app.button[0].click().run()
         self.assertFalse(app.session_state['history_dirty'])
@@ -190,9 +200,23 @@ class HistoryUITests(unittest.TestCase):
         self.assertFalse(app.exception)
         self.assertTrue(app.session_state['history_dirty'])
         self.assertEqual(app.session_state['messages'][0]['text'], '未保存の質問')
-        self.assertTrue(next(b for b in app.button if b.label == 'この会話を開く').disabled)
+        self.assertTrue(next(b for b in app.button if b.label == '保存した質問').disabled)
         next(b for b in app.button if b.label == '再保存').click().run()
         self.assertFalse(app.session_state['history_dirty'])
+
+    def test_list_refreshes_on_first_save_but_not_followups_or_open(self):
+        app = self.render()
+        self.assertEqual(app.session_state['list_calls'], 1)
+        self.assertNotIn('履歴を更新', [b.label for b in app.button])
+        self.assertNotIn('この会話を開く', [b.label for b in app.button])
+        app.run()
+        self.assertEqual(app.session_state['list_calls'], 1)
+        app.button[0].click().run()
+        self.assertEqual(app.session_state['list_calls'], 2)
+        app.button[0].click().run()
+        self.assertEqual(app.session_state['list_calls'], 2)
+        next(b for b in app.button if b.label == '保存した質問').click().run()
+        self.assertEqual(app.session_state['list_calls'], 2)
 
     def test_identity_change_clears_previous_users_conversation(self):
         source = '''

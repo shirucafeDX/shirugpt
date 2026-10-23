@@ -27,6 +27,13 @@ CONTEXT_FIELDS = (
 )
 
 
+def conversation_title(messages):
+    """最初の質問から、一覧に収まる一行のタイトルを作る。追加の AI 呼出は不要。"""
+    first = next((m['text'] for m in messages if m['role'] == 'user'), '')
+    title = ' '.join(first.split())
+    return title[:39] + '…' if len(title) > 40 else title or '新しいチャット'
+
+
 def policy(settings):
     return [settings.gcp_project, sorted(settings.allowed_datasets), settings.gemini_model]
 
