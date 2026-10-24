@@ -79,3 +79,17 @@ class EffortTests(unittest.TestCase):
         self.assertEqual(app.session_state.ctx.thinking_mode, 'low')
         self.assertEqual(app.session_state.contents, ['続きの会話'])
         self.assertFalse(app.session_state.ctx.tools.mock_calls)
+
+    def test_command_menu_trigger_queues_only_supported_local_commands(self):
+        app = AppTest.from_string("""
+import streamlit as st
+from src.command_menu import _keyboard_event
+st.session_state['slash_command_menu'] = {'action': {'kind': 'command', 'command': '/thinking'}}
+_keyboard_event()
+st.session_state['queued'] = st.session_state.pop('keyboard_command', None)
+st.session_state['slash_command_menu'] = {'action': {'kind': 'command', 'command': '/unknown'}}
+_keyboard_event()
+""").run(timeout=20)
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state['queued'], '/thinking')
+        self.assertNotIn('keyboard_command', app.session_state)

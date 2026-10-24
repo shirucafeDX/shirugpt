@@ -35,6 +35,7 @@ from src.bq_tools import (
 from src.charts import KIND_LABELS, ChartSpec, suggest_chart
 from src.execution import BackgroundTurn, ExecutionStopped
 from src.commands import HELP, parse_command, usage_text, current_month_usage_text
+from src.command_menu import render_command_menu
 from src.presentation import choose_presentation
 from src.config import (
     DEFAULT_MONTHLY_LIMIT_USD,
@@ -791,25 +792,39 @@ def render_clarification(
     selection_mode = message["clarification"].get("selection_mode", "single")
     prefix = f"clarification_{ctx.session_id}_{msg_idx}"
     choice_key = f"{prefix}_choices"
+    panel_key = f"clarification_picker_{selection_mode}_{ctx.session_id}_{msg_idx}"
+    intent = st.session_state.pop("clarification_keyboard", None)
+    keyboard_submit = False
+    if not blocked and isinstance(intent, dict) and intent.get("panel") == panel_key:
+        index = intent.get("index")
+        options = message["clarification"]["options"]
+        if isinstance(index, int) and 0 <= index < len(options):
+            if selection_mode == "single":
+                st.session_state[choice_key] = [options[index]]
+            else:
+                toggle_clarification_choice(choice_key, options[index], selection_mode)
+            keyboard_submit = selection_mode == "single"
+        elif intent.get("submit") is True:
+            keyboard_submit = True
     selected = st.session_state.get(choice_key, [])
-    with st.container(border=True):
+    with st.container(border=True, key=panel_key):
         st.markdown("選択肢から回答（複数選択可）" if selection_mode == "multi" else "選択肢から回答（1つ選択）")
         with st.container(horizontal=True):
             for index, option in enumerate(message["clarification"]["options"], start=1):
                 st.button(
                     f"{index}. {option}", key=f"{prefix}_option_{index}",
                     type="primary" if option in selected else "secondary",
-                    disabled=blocked, shortcut=str(index),
+                    disabled=blocked,
                     on_click=toggle_clarification_choice,
                     args=(choice_key, option, selection_mode),
                 )
-        st.caption("クリックまたは数字キー（1〜5）で選択・解除できます。文字入力中は数字キーで選択されません。")
+        st.caption("数字キーで選択、↑↓で移動。単回答は数字またはEnterで即送信、複数回答は数字で選択・解除してEnterで送信します。文字入力中は選択されません。")
         free_text = st.text_area(
             "自由記述・補足（選択せずに入力することもできます）", disabled=blocked,
             key=f"{prefix}_free_text",
         )
         submitted = st.button("回答して続ける", type="primary", disabled=blocked, key=f"{prefix}_submit")
-    if not submitted or blocked:
+    if not (submitted or keyboard_submit) or blocked:
         return
     free_text = free_text.strip()
     if not selected and not free_text:
@@ -894,8 +909,8 @@ def render_prompt_input(ctx: ToolContext) -> str | None:
 </style>
 """.replace("__COLOR__", color), unsafe_allow_html=True)
     prompt = st.chat_input("質問、または /help などのコマンドを入力", key="prompt_input")
-    return prompt
-
+    render_command_menu()
+    return st.session_state.pop("keyboard_command", None) or prompt
 
 
 def handle_command(prompt, ctx, settings, tools, usage_logger, user_email,

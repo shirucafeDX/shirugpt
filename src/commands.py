@@ -5,6 +5,15 @@ from dataclasses import dataclass
 
 from .config import BQ_PRICE_PER_TIB_USD, GEMINI_PRICE_AS_OF, bq_cost_usd, gemini_cost_usd, human_bytes
 
+COMMAND_SUGGESTIONS = [
+    {"command": "/help", "description": "コマンドの一覧を表示"},
+    {"command": "/model", "description": "使用中のモデルを確認"},
+    {"command": "/new", "description": "新しいチャットを開始"},
+    {"command": "/usage", "description": "当月のトークン・クエリ量・費用を確認"},
+    {"command": "/thinking", "description": "詳細分析モードを切り替え（有効時High）"},
+    {"command": "/effort", "description": "Low / Medium / Highを選択"},
+]
+
 
 HELP = """\
 | コマンド | 内容 |

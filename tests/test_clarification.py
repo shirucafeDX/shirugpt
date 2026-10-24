@@ -167,7 +167,7 @@ class ClarificationUITests(unittest.TestCase):
     def test_number_shortcuts_are_assigned_to_choices(self):
         app = self.open()
         self.assertEqual([b.label for b in self.choices(app)], ['1. 今月と先月', '2. 今年と昨年'])
-        self.assertEqual([b.proto.shortcut for b in self.choices(app)], ['1', '2'])
+        self.assertEqual([b.proto.shortcut for b in self.choices(app)], ['', ''])
 
     def test_selection_and_supplement_continue_analysis_and_preserve_original_request(self):
         app = self.open()
@@ -244,3 +244,38 @@ class ClarificationUITests(unittest.TestCase):
         self.choose(app, 1)
         self.submit(app)
         self.assertIn('今月と先月', app.session_state.messages[2]['text'])
+
+    def keyboard(self, app, index=None, submit=False, panel=None):
+        ctx = app.session_state.ctx
+        mode = app.session_state['selection_mode']
+        app.session_state['clarification_keyboard'] = dict(
+            panel=panel or f'clarification_picker_{mode}_{ctx.session_id}_1', index=index, submit=submit)
+        app.run()
+        self.assertFalse(app.exception)
+
+    def test_keyboard_single_submits_and_includes_supplement(self):
+        app = self.open()
+        app.text_area[0].input('東京の店舗だけ').run()
+        self.keyboard(app, index=1)
+        self.assertTrue(app.session_state.messages[1]['clarification']['answered'])
+        self.assertIn('今年と昨年', app.session_state.messages[2]['text'])
+        self.assertIn('東京の店舗だけ', app.session_state.messages[2]['text'])
+
+    def test_keyboard_multi_toggles_then_enter_submits(self):
+        app = self.open('multi')
+        self.keyboard(app, index=0)
+        self.keyboard(app, index=1)
+        self.assertEqual(self.selected(app), ['今月と先月', '今年と昨年'])
+        self.keyboard(app, index=0)
+        self.assertEqual(self.selected(app), ['今年と昨年'])
+        self.keyboard(app, submit=True)
+        self.assertIn('今年と昨年', app.session_state.messages[2]['text'])
+        self.assertNotIn('今月と先月', app.session_state.messages[2]['text'])
+
+    def test_stale_or_blocked_keyboard_selection_cannot_submit(self):
+        app = self.open()
+        self.keyboard(app, index=0, panel='old_question')
+        self.assertFalse(app.session_state.messages[1]['clarification']['answered'])
+        app.session_state['blocked'] = True
+        self.keyboard(app, index=0)
+        self.assertFalse(app.session_state.messages[1]['clarification']['answered'])
