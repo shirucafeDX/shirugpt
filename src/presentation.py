@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, replace
 
 import pandas as pd
 
 from .bq_tools import QueryRun
-from .charts import ChartSpec, suggest_chart
+from .charts import ChartSpec, suggest_chart, validate_chart
 
 
 @dataclass
@@ -51,14 +52,22 @@ def choose_presentation(
         return Presentation(index=index)
     requested = explicit_format(question)
     signature = hashlib.sha256(
-        (str(list(zip(df.columns, map(str, df.dtypes)))) + df.to_json(date_format="iso", default_handler=str)).encode()
+        (str(list(zip(df.columns, map(str, df.dtypes)))) + df.to_json(date_format="iso", default_handler=str)
+         + json.dumps(runs[index].chart, sort_keys=True, default=str)).encode()
     ).hexdigest()
     if requested == "none" or (requested is None and signature in (shown or set())):
         return Presentation(index=index)
     if requested == "table":
         return Presentation(index, "table", signature=signature)
 
-    spec = suggest_chart(df)
+    chart_choice = runs[index].chart
+    if isinstance(chart_choice, dict) and chart_choice.get("kind") == "none":
+        if requested == "chart":
+            return Presentation(index, "table", note="グラフに適した結果がないため、表で表示しています。", signature=signature)
+        return Presentation(index=index)
+    spec = validate_chart(df, chart_choice) if chart_choice is not None else suggest_chart(df)
+    if chart_choice is not None and spec is None:
+        return Presentation(index, "table", note="グラフ指定・数値・集計粒度が適切でないため、表で表示しています。", signature=signature)
     chart_df = df
     # 単一数値列の明細も、分布の依頼ならサーバー内で度数分布にする。
     distribution = re.search(r"分布|ヒストグラム", question)
@@ -69,7 +78,7 @@ def choose_presentation(
             chart_df = pd.DataFrame({f"{df.columns[0]}の範囲": counts.index.astype(str), "件数": counts.values})
             spec = suggest_chart(chart_df)
 
-    if requested != "chart":
+    if requested != "chart" and chart_choice is None:
         explanation = re.search(r"なぜ|理由|原因|どうして|説明|考察", question)
         visual_intent = re.search(r"推移|月別|日別|週別|年別|時系列|比較|店舗別|ランキング|上位|分布|傾向|内訳|相関", question)
         if len(df) < 3 or explanation or not (visual_intent or (spec and spec.kind == "line")):
@@ -84,9 +93,18 @@ def choose_presentation(
         spec = replace(spec, kind=requested_kind)
 
     note = ""
-    if spec.kind == "bar" and len(chart_df) > 10:
+    if spec.color:
+        # 同じ軸・内訳が重複すると描画時の暗黙の集約で値が変わるので、表へ戻す。
+        if chart_df.duplicated([spec.x, spec.color]).any():
+            return Presentation(index, "table", note="同じ軸・内訳の組に複数行があるため、表で表示しています。", signature=signature)
+        chart_df = chart_df.copy()
+        chart_df[spec.color] = chart_df[spec.color].astype("string").fillna("未設定")
+    if spec.kind == "bar" and chart_df[spec.x].nunique() > 10:
         y = spec.y[0]
-        chart_df = chart_df.nlargest(10, y) if pd.api.types.is_numeric_dtype(chart_df[y]) else chart_df.head(10)
-        note = f"「{y}」の上位10件を表示しています。全件は「データ・実行詳細」で確認できます。"
+        totals = chart_df.groupby(spec.x, observed=True)[y].sum(min_count=1)
+        top = totals.nlargest(10).index
+        chart_df = chart_df[chart_df[spec.x].isin(top)].copy()
+        chart_df = chart_df.sort_values(spec.x, key=lambda series: series.map({value: i for i, value in enumerate(top)}), kind="stable")
+        note = f"「{y}」の合計による上位10カテゴリを、内訳を含めて表示しています。全件は「データ・実行詳細」で確認できます。"
     spec = replace(spec, reason="")
     return Presentation(index, "chart", spec, chart_df, note, signature)

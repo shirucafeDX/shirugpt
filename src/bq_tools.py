@@ -57,6 +57,7 @@ class QueryRun:
     truncated: bool = False
     purpose: str = ""
     result_role: str = "answer"
+    chart: dict[str, Any] | None = None
 
 
 def _flatten_schema(

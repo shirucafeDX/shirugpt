@@ -136,7 +136,17 @@ run_query が error を返したら、内容を読んで SQL を修正し、最�
 
 ## 回答スタイル
 - 結論を文章で先に示す。単一の数値・少数の比較は数値と差分を文章で説明する。
-- 図表は画面側が質問と結果から選ぶ。表を明示的に求められていない限り、
+- 図表の種類・X軸・Y軸・必要な内訳はあなたが質問と結果に応じて判断する。
+  最終回答用のrun_queryにはchartを指定する。文章だけで十分ならkind="none"、
+  時間・日付・年月の推移は原則lineで横軸を時間、カテゴリ比較は原則barで横軸をカテゴリにする。
+  数値同士の関係・相関を見るならscatter、量の推移や積み上げ構成を強調するならareaも検討する。
+  年月は時系列として正しく並ぶDATEやYYYY-MM形式、時間帯は数値でSQLに出力する。
+  内訳が分析に必要な場合だけcolorにカテゴリ列を指定し、yは1つの数値列にする。
+  例：月別・店舗別の来店数ならkind="line", x="月", y=["来店数"], color="店舗"。
+  棒グラフのcolorは積み上げ内訳になる。無関係なカテゴリを常に内訳にしてはいけない。
+  指定する列名はSELECTの出力列名（別名）と一致させる。内訳列もGROUP BYし、
+  同じX軸・内訳の組に結果が1行になる粒度で集計する。
+  表を明示的に求められていない限り、
   回答本文に Markdown の表を重ねて書かない。SQL や調査途中の結果も本文に列挙しない。
 - run_query の result_role は、探索・検証・途中計算なら supporting、
   質問の結論に使う結果なら answer を指定する。画面は最後の answer のみを表示候補にする。
@@ -369,6 +379,17 @@ def build_declarations() -> list[types.FunctionDeclaration]:
                         type=types.Type.STRING,
                         description="このクエリで何を確認したいかの短い説明（日本語）",
                     ),
+                    "chart": types.Schema(
+                        type=types.Type.OBJECT,
+                        description="回答のグラフ指定。不要ならkind=none。種類・軸・内訳を質問に応じて判断する。",
+                        properties={
+                            "kind": types.Schema(type=types.Type.STRING, enum=["none", "bar", "line", "area", "scatter"]),
+                            "x": types.Schema(type=types.Type.STRING, description="時間・年月やカテゴリの横軸の出力列名"),
+                            "y": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING), description="数値の出力列名。color使用時は1列"),
+                            "color": types.Schema(type=types.Type.STRING, description="必要な場合だけ指定する内訳のカテゴリ列名"),
+                        },
+                        required=["kind"],
+                    ),
                     "result_role": types.Schema(
                         type=types.Type.STRING,
                         enum=["supporting", "answer"],
@@ -533,7 +554,7 @@ class GeminiAgent:
             run = ctx.query_cache[key]
             # 図表だけを求める追質問にも対応する。履歴内の結果は書き換えない。
             ctx.turn_runs = [r for r in ctx.turn_runs if _sql_key(r.original_sql) != key]
-            ctx.turn_runs.append(replace(run, result_role=result_role))
+            ctx.turn_runs.append(replace(run, result_role=result_role, chart=args.get("chart", run.chart)))
             payload = self._query_payload(run)
             payload["cached"] = True
             return payload
@@ -555,6 +576,7 @@ class GeminiAgent:
             raise _Pending(key, need) from None
 
         run.result_role = result_role
+        run.chart = args.get("chart")
         ctx.query_cache[key] = run
         ctx.turn_runs.append(run)
         ctx.session_billed_bytes += run.billed_bytes

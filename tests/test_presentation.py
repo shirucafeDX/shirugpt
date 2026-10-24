@@ -70,7 +70,7 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(len(plan.dataframe), 10)
         self.assertEqual(plan.dataframe['来店数'].tolist(), list(range(24, 14, -1)))
         self.assertEqual(len(df), 25)
-        self.assertIn('上位10件', plan.note)
+        self.assertIn('上位10カテゴリ', plan.note)
 
     def test_single_column_distribution_preserves_observations(self):
         df = pd.DataFrame({'思考トークン': [0, 10, 20, 300, 4000, None]})
@@ -113,6 +113,75 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(choose_presentation('グラフで', ctx.turn_runs).mode, 'chart')
         agent._run_query({'sql': original.sql}, ctx)
         self.assertEqual(len(ctx.turn_runs), 1)
+
+    def test_ai_can_choose_time_axis_and_optional_breakdown(self):
+        df = pd.DataFrame({'時間': [9, 9, 10, 10], '店舗': ['A', 'B', 'A', 'B'], '来店数': [1, 2, 3, 4]})
+        result = run(df)
+        result.chart = {'kind': 'line', 'x': '時間', 'y': ['来店数'], 'color': '店舗'}
+        plan = choose_presentation('時間帯の特徴は？', [result])
+        self.assertEqual(plan.mode, 'chart')
+        self.assertEqual((plan.chart.kind, plan.chart.x, plan.chart.y, plan.chart.color),
+                         ('line', '時間', ['来店数'], '店舗'))
+        self.assertEqual(len(plan.dataframe), 4)
+        result.chart = {'kind': 'none'}
+        self.assertEqual(choose_presentation('時間帯を比較', [result]).mode, 'none')
+        result.chart = {'kind': 'line', 'x': '時間', 'y': ['来店数']}
+        self.assertIsNone(choose_presentation('時間帯の特徴は？', [result]).chart.color)
+        self.assertEqual(choose_presentation('表で', [result]).mode, 'table')
+
+    def test_new_ai_view_is_not_suppressed_as_a_duplicate_of_the_same_data(self):
+        result = run(categories())
+        result.chart = {'kind': 'bar', 'x': '店舗', 'y': ['来店数']}
+        first = choose_presentation('店舗比較', [result])
+        seen = {first.signature}
+        self.assertEqual(choose_presentation('店舗比較', [result], seen).mode, 'none')
+        result.chart = {'kind': 'line', 'x': '店舗', 'y': ['来店数']}
+        self.assertEqual(choose_presentation('別の表示', [result], seen).mode, 'chart')
+
+    def test_invalid_ai_columns_and_duplicate_groups_fall_back_to_table(self):
+        result = run(categories())
+        for chart in ({'kind': 'line', 'x': '存在しない列', 'y': ['来店数']},
+                      {'kind': 'bar', 'x': '店舗', 'y': ['来店数'], 'color': '店舗'},
+                      {'kind': 'bar', 'x': '来店数', 'y': ['店舗']},
+                      {'kind': []}):
+            result.chart = chart
+            self.assertEqual(choose_presentation('比較', [result]).mode, 'table')
+        result = run(pd.DataFrame({'月': [1, 1], '店舗': ['A', 'A'], '件数': [2, 3]}))
+        result.chart = {'kind': 'bar', 'x': '月', 'y': ['件数'], 'color': '店舗'}
+        self.assertEqual(choose_presentation('比較', [result]).mode, 'table')
+
+    def test_breakdown_top_ten_retains_every_series_for_each_selected_category(self):
+        df = pd.DataFrame({'店舗': [f'店{i}' for i in range(12) for _ in range(2)],
+                           '学年': ['1年', '2年'] * 12, '件数': [v for i in range(12) for v in [i, i * 2]]})
+        result = run(df)
+        result.chart = {'kind': 'bar', 'x': '店舗', 'y': ['件数'], 'color': '学年'}
+        plan = choose_presentation('店舗別の内訳', [result])
+        self.assertEqual(len(plan.dataframe), 20)
+        self.assertEqual(plan.dataframe['店舗'].nunique(), 10)
+        self.assertEqual(plan.dataframe.groupby('店舗')['学年'].nunique().tolist(), [2] * 10)
+        self.assertEqual(len(result.dataframe), 24)
+
+    def test_cached_chart_spec_can_change_without_mutating_previous_answer_or_requerying(self):
+        settings = Mock()
+        ctx = ToolContext(tools=Mock(), settings=settings)
+        result = run(categories())
+        ctx.tools.run_query.return_value = result
+        agent = GeminiAgent(settings, client=Mock())
+        original_chart = {'kind': 'bar', 'x': '店舗', 'y': ['来店数']}
+        agent._run_query({'sql': result.sql, 'chart': original_chart}, ctx)
+        previous = list(ctx.turn_runs)
+        ctx.start_turn()
+        agent._run_query({'sql': result.sql, 'chart': {'kind': 'none'}}, ctx)
+        self.assertEqual(previous[0].chart, original_chart)
+        self.assertEqual(ctx.turn_runs[0].chart, {'kind': 'none'})
+        ctx.tools.run_query.assert_called_once()
+        from src.chat_history import pack, unpack
+        settings.gcp_project = 'test'
+        settings.allowed_datasets = ('data',)
+        settings.gemini_model = 'gemini-3.8-flash'
+        restored, _, _ = unpack(pack([{'role': 'assistant', 'runs': previous}], [], ctx, None),
+                                ToolContext(tools=Mock(), settings=settings))
+        self.assertEqual(restored[0]['runs'][0].chart, original_chart)
 
 
 class StreamlitRenderingTests(unittest.TestCase):
@@ -160,12 +229,11 @@ render_message({{'role':'assistant','text':'回答です','question':{question!r
         self.assertEqual(app.expander[0].code[0].value, 'SELECT 1')
         self.assertEqual(len(app.selectbox), 0)
 
-    def test_chart_and_axis_interaction(self):
+    def test_chart_has_no_manual_type_or_axis_controls(self):
         app = self.render('店舗別の比較')
-        self.assertEqual(len(app.selectbox), 2)
-        app.selectbox[0].select('line').run()
-        self.assertEqual(len(app.exception), 0)
-        self.assertEqual(app.selectbox[0].value, 'line')
+        self.assertEqual(len(app.selectbox), 0)
+        self.assertEqual(len(app.multiselect), 0)
+        self.assertEqual(len(app.get('vega_lite_chart')), 1)
 
     def test_explicit_table_is_visible_without_data_expander(self):
         app = self.render('一覧にして')
@@ -183,3 +251,27 @@ render_message({{'role':'assistant','text':'回答です','question':{question!r
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BreakdownRenderingTests(unittest.TestCase):
+    def test_line_and_stacked_bar_include_color_encoding(self):
+        import json
+        for kind in ('line', 'bar'):
+            app = AppTest.from_string("""
+import pandas as pd
+from app import render_chart
+from src.charts import ChartSpec
+frame = pd.DataFrame({'月': ['2026-01', '2026-01', '2026-02', '2026-02'],
+    '店舗': ['A', 'B', 'A', 'B'], '件数': [1, 2, 3, 4]})
+render_chart(frame, ChartSpec(KIND, '月', ['件数'], color='店舗'), 'test')
+""".replace('KIND', repr(kind))).run(timeout=20)
+            self.assertFalse(app.exception)
+            self.assertEqual(len(app.warning), 0)
+            charts = app.get('vega_lite_chart')
+            self.assertEqual(len(charts), 1)
+            spec = json.loads(charts[0].proto.spec)
+            encoding = spec.get('encoding') or spec['layer'][0]['encoding']
+            self.assertEqual(encoding['color']['field'], '店舗')
+            self.assertEqual(encoding['x']['field'], '月')
+            if kind == 'bar':
+                self.assertTrue(encoding['y']['stack'])

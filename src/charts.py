@@ -1,9 +1,4 @@
-"""クエリ結果からグラフの種類と軸を推定する。
-
-**この推定はすべてサーバー側で完結する。** Gemini には一切問い合わせない。
-グラフのためにデータやスキーマを Gemini 境界の向こうへ送らないための設計で、
-`summarize` と同じ「Gemini に渡すものを絞る」方針の延長にある。
-"""
+"""AIのグラフ指定の検証と、指定のない旧履歴向けの推定。追加のAI呼び出しは行わない。"""
 
 from __future__ import annotations
 
@@ -30,6 +25,7 @@ class ChartSpec:
     reason: str = ""
     candidates_x: list[str] = field(default_factory=list)
     candidates_y: list[str] = field(default_factory=list)
+    color: str | None = None
 
 
 def _classify(df: pd.DataFrame) -> tuple[list[str], list[str], list[str]]:
@@ -116,3 +112,19 @@ def suggest_chart(df: pd.DataFrame) -> ChartSpec | None:
         )
 
     return None
+
+
+def validate_chart(df: pd.DataFrame, value: object) -> ChartSpec | None:
+    """AIが指定した列を実結果で検証する。不正な指定でデータを誤表示しない。"""
+    if not isinstance(value, dict) or not isinstance(value.get("kind"), str) or value["kind"] not in KIND_LABELS:
+        return None
+    x, y, color = value.get("x"), value.get("y"), value.get("color") or None
+    if not isinstance(x, str) or x not in df.columns or not isinstance(y, list) or not y:
+        return None
+    if any(not isinstance(col, str) or col not in df.columns or col == x for col in y):
+        return None
+    if len(y) != len(set(y)) or any(not pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col]) for col in y):
+        return None
+    if color is not None and (not isinstance(color, str) or color not in df.columns or color == x or color in y or len(y) != 1):
+        return None
+    return ChartSpec(kind=value["kind"], x=x, y=list(y), color=color)

@@ -32,7 +32,7 @@ from src.bq_tools import (
     friendly_error,
     technical_detail,
 )
-from src.charts import KIND_LABELS, ChartSpec, suggest_chart
+from src.charts import ChartSpec
 from src.execution import BackgroundTurn, ExecutionStopped
 from src.commands import HELP, parse_command, usage_text, current_month_usage_text
 from src.command_menu import render_command_menu
@@ -476,46 +476,17 @@ def render_table(run: QueryRun, idx: int, msg_idx: int) -> None:
 
 
 def render_chart(df, spec: ChartSpec, key_prefix: str) -> None:
-    kinds = list(KIND_LABELS)
-    col1, col2, col3 = st.columns([2, 3, 4])
-    kind = col1.selectbox(
-        "種類",
-        options=kinds,
-        index=kinds.index(spec.kind),
-        format_func=lambda k: KIND_LABELS[k],
-        key=f"{key_prefix}_kind",
-    )
-    x = col2.selectbox(
-        "X 軸",
-        options=spec.candidates_x,
-        index=spec.candidates_x.index(spec.x) if spec.x in spec.candidates_x else 0,
-        key=f"{key_prefix}_x",
-    )
-    y_options = [c for c in spec.candidates_y if c != x]
-    if not y_options:
-        st.info("Y 軸に使える数値列がありません。X 軸を変更してください。")
-        return
-    y = col3.multiselect(
-        "Y 軸（数値列）",
-        options=y_options,
-        default=[c for c in spec.y if c in y_options] or y_options[:1],
-        key=f"{key_prefix}_y",
-    )
-    if not y:
-        st.info("Y 軸の列を 1 つ以上選んでください。")
-        return
-
-    kwargs = {"x": x, "y": y}
-    if kind == "bar":
-        # SQL 側の ORDER BY を尊重する（既定では X 軸で並べ替えられてしまう）
+    kwargs = {"x": spec.x, "y": spec.y}
+    if spec.color:
+        kwargs["color"] = spec.color
+    if spec.kind == "bar":
         kwargs["sort"] = False
+        kwargs["stack"] = True if spec.color else False
     try:
-        CHART_FUNCS[kind](df, **kwargs)
-    except Exception:  # noqa: BLE001 - 描画不能な組み合わせは表にフォールバック
-        st.warning(
-            "この列の組み合わせではグラフを描画できませんでした。"
-            "軸の指定を変えるか「データ・実行詳細」を開いてください。"
-        )
+        CHART_FUNCS[spec.kind](df, **kwargs)
+    except Exception:  # noqa: BLE001
+        st.warning("グラフを描画できなかったため、表で表示しています。")
+        st.dataframe(df, hide_index=True)
         return
     if spec.reason:
         st.caption(spec.reason)
