@@ -629,7 +629,10 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
                     "question": question,
                     "runs": list(ctx.turn_runs),
                     "errors": list(ctx.turn_errors),
-                    **({"clarification": {"options": result.options, "answered": False}}
+                    **({"clarification": {
+                        "options": result.options, "selection_mode": result.selection_mode,
+                        "answered": False,
+                    }}
                        if isinstance(result, ClarificationResult) else {}),
                 }
             )
@@ -695,11 +698,15 @@ def render_clarification(
     message: dict[str, Any], msg_idx: int, agent: GeminiAgent,
     ctx: ToolContext, blocked: bool = False,
 ) -> None:
+    selection_mode = message["clarification"].get("selection_mode", "single")
     with st.form(f"clarification_{ctx.session_id}_{msg_idx}"):
-        selected = st.radio(
-            "選択肢から回答", message["clarification"]["options"],
-            index=None, disabled=blocked,
+        selected = st.pills(
+            "選択肢から回答（複数選択可）" if selection_mode == "multi" else "選択肢から回答（1つ選択）",
+            message["clarification"]["options"], selection_mode=selection_mode,
+            default=None, disabled=blocked,
+            key=f"clarification_choice_{ctx.session_id}_{msg_idx}",
         )
+        st.caption("選んだ項目をもう一度クリックすると選択を解除できます。")
         free_text = st.text_area(
             "自由記述・補足（選択せずに入力することもできます）", disabled=blocked,
         )
@@ -710,7 +717,8 @@ def render_clarification(
     if not selected and not free_text:
         st.warning("選択肢を選ぶか、自由記述を入力してください。")
         return
-    answer = "\n".join(part for part in [selected, free_text] if part)
+    selected_values = selected if selection_mode == "multi" else [selected]
+    answer = "\n".join(part for part in [*(selected_values or []), free_text] if part)
     message["clarification"]["answered"] = True
     submit_prompt(
         f"確認への回答（{message['text']}）：\n{answer}", agent, ctx,

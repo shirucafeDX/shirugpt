@@ -40,16 +40,23 @@ SYSTEM_INSTRUCTION = """あなたは BigQuery のデータ分析アシスタン�
 ユーザーの質問に対し、提供されたツールを使って BigQuery を調べ、日本語で回答します。
 
 ## 進め方
-0. 期間・対象店舗・指標など、回答を左右する条件が曖昧なら ask_clarification で
-   ユーザーに確認する。質問と選択肢はその都度、日本語で作る。
+0. 確認質問の前に、質問に関連するテーブルと列・型・説明をツールで確認し、
+   どのデータで何を分析できるかを把握する。確認済みの関連スキーマは再利用してよい。
+   店舗名・商品名などの値も、必要なら少量の集計や DISTINCT で実在を確認する。
+   売上・顧客単価など、必要な列が確認できていない指標を選択肢に含めない。
+   そのうえで期間・対象店舗・指標など、回答を左右する条件が曖昧なら
+   ask_clarification でユーザーに確認する。質問と選択肢はその都度、日本語で作る。
    ユーザーの回答を求める確認質問は、必ず ask_clarification を呼び出して提示する。
    通常の回答本文に質問と箇条書きの選択肢を書くだけで終了してはいけない。
    例: 「京大店の強み」のように分析の観点を確認する場合も、question に確認内容、
    options に選択肢を指定して呼ぶ。画面が選択式フォームと自由記述欄を表示する。
    一度に確認するのは1項目とし、選びやすい2〜5個の選択肢を用意する。
+   selection_mode は、排他的な条件を1つ選ぶ場合（集計単位など）は single、
+   複数を同時に選べる場合（比較したい店舗や分析指標など）は multi にする。
+   質問文にも「1つ」「複数選択可」など回答方法を明記する。
    自由記述欄は画面が付けるため、選択肢に「その他」「自由記述」を含めない。
    確認が不要な明確な質問には、そのまま回答する。既に回答された条件を再確認しない。
-   実在する店舗・指標は必要に応じてツールで確認し、選択肢を捏造しない。
+   確認したデータで分析できる選択肢だけを提示する。
    ask_clarification は単独で呼び、ユーザーの回答を待ってから分析を続ける。
 1. どのテーブルを見るか不明なときは list_datasets → list_tables でテーブル名を確認する。
 2. 使いそうなテーブルにだけ get_table_schema を呼び、列名と型を確認する。
@@ -215,6 +222,7 @@ class AnswerResult:
 class ClarificationResult:
     text: str
     options: list[str]
+    selection_mode: str = "single"
 
 
 @dataclass
@@ -239,6 +247,7 @@ def build_declarations() -> list[types.FunctionDeclaration]:
             name="ask_clarification",
             description=(
                 "分析に必要な条件・観点をユーザーに確認し、選択式フォームで回答を待つ。"
+                "先に関連するテーブルのスキーマと必要な値を確認し、実データに基づく質問・選択肢を作る。"
                 "確認質問は必ずこのツールで提示し、通常の回答本文に質問・選択肢を書くだけで終了しない。"
                 "単独で呼ぶ。自由記述欄は画面側が付けるため、その他・自由記述を選択肢に含めない。"
             ),
@@ -252,8 +261,12 @@ def build_declarations() -> list[types.FunctionDeclaration]:
                         description="回答の選択肢2〜5個。その他・自由記述は含めない。",
                         min_items=2, max_items=5,
                     ),
+                    "selection_mode": types.Schema(
+                        type=types.Type.STRING, enum=["single", "multi"],
+                        description="排他的な条件を1つ選ぶなら single、店舗・指標など複数選べるなら multi。",
+                    ),
                 },
-                required=["question", "options"],
+                required=["question", "options", "selection_mode"],
             ),
         ),
         types.FunctionDeclaration(
@@ -370,8 +383,16 @@ class GeminiAgent:
         self, name: str, args: dict[str, Any], ctx: ToolContext
     ) -> dict[str, Any]:
         if name == "ask_clarification":
+            if not ctx.schema_cache:
+                raise BQToolError(
+                    "確認質問の前に、関連するテーブルの get_table_schema を呼んでください。"
+                    "取得できるデータを把握し、分析できる選択肢だけを提示してください。"
+                )
             question = args.get("question")
             options = args.get("options")
+            selection_mode = args.get("selection_mode", "single")
+            if selection_mode not in ("single", "multi"):
+                raise BQToolError("selection_mode は single または multi を指定してください。")
             if not isinstance(question, str) or not question.strip():
                 raise BQToolError("question に確認したい質問を指定してください。")
             if (not isinstance(options, list) or not 2 <= len(options) <= 5
@@ -380,7 +401,10 @@ class GeminiAgent:
             options = [option.strip() for option in options]
             if len(set(options)) != len(options):
                 raise BQToolError("options の選択肢は重複しないようにしてください。")
-            return {"status": "awaiting_user", "question": question.strip(), "options": options}
+            return {
+                "status": "awaiting_user", "question": question.strip(),
+                "options": options, "selection_mode": selection_mode,
+            }
 
         if name == "list_datasets":
             if "datasets" not in ctx.listing_cache:
@@ -690,7 +714,9 @@ class GeminiAgent:
                     responses.append(tool_response)
                     payload = tool_response.function_response.response
                     if call.name == "ask_clarification" and payload.get("status") == "awaiting_user":
-                        clarification = ClarificationResult(payload["question"], payload["options"])
+                        clarification = ClarificationResult(
+                            payload["question"], payload["options"], payload["selection_mode"],
+                        )
             except _Pending as pending:
                 # ここで中断。承認後に同じ pending_calls から再開する。
                 ctx.resume_calls = pending_calls
@@ -705,7 +731,8 @@ class GeminiAgent:
             contents.append(types.Content(role="user", parts=responses))
             if clarification is not None:
                 # ツール呼出への応答を完結させ、次のユーザー回答を通常の会話として受ける。
-                self._answer(contents, clarification.text + "\n" + "\n".join(f"- {option}" for option in clarification.options))
+                mode_label = "複数選択可" if clarification.selection_mode == "multi" else "1つ選択"
+                self._answer(contents, clarification.text + f"\n（{mode_label}・自由記述可）\n" + "\n".join(f"- {option}" for option in clarification.options))
                 return clarification
             processed_tools = True
             pending_calls = None
