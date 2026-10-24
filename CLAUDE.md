@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+コミットメッセージは [AGENTS.md](AGENTS.md) のルールに従い、`feat:`・`fix:` などの変更種別で始める。
+
 ## 認証情報の取り扱い
 
 `credentials/` 配下のファイル（サービスアカウントキー）の**中身は読まない**。
