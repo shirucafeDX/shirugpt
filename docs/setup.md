@@ -217,7 +217,7 @@ cp .env.example .env
 | `MAX_BYTES_BILLED` | `10737418240`（10GB） | BigQuery に渡す課金上限。超えるクエリは BigQuery 側で失敗 |
 | `DEFAULT_ROW_LIMIT` | `1000` | 外側に `LIMIT` が無い場合に自動付与する行数 |
 | `MAX_RESULT_ROWS` | `5000` | UI に読み込む最大行数（メモリ保護） |
-| `SAMPLE_ROWS` | `15` | Gemini に渡すサンプル行数 |
+| `SAMPLE_ROWS` | `500` | Gemini に渡す先頭のサンプル行数 |
 | `MAX_TOOL_ITERATIONS` | `12` | 1 ターンあたりの tool 呼び出しループ上限 |
 | `BQ_LOG_DATASET` | （空） | 利用ログの記録先データセット。空で機能オフ。**allowlist に含めない** |
 | `BQ_LOG_TABLE` | `usage_events` | 利用ログのテーブル名 |
