@@ -705,12 +705,8 @@ class GeminiAgent:
             if ctx.execution_control is not None:
                 ctx.execution_control.check()
             if pending_calls is None:
-                if on_progress is not None:
-                    on_progress(
-                        "取得したデータを確認し、回答をまとめています…" if ctx.turn_runs else
-                        "確認した情報をもとに、分析を進めています…" if processed_tools else
-                        "質問に合う調べ方を考えています…"
-                    )
+                if on_progress is not None and not processed_tools and not ctx.turn_runs:
+                    on_progress("質問に合う調べ方を考えています…")
                 try:
                     response = self._generate(contents)
                 except Exception as exc:  # noqa: BLE001 - 記録してから同じ例外を上に伝える

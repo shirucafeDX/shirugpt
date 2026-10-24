@@ -92,7 +92,8 @@ class AgentTests(unittest.TestCase):
         self.assertIn('店舗データ.来店', observed[2])
         self.assertIn('列名・データ型', observed[2])
         self.assertIn('店舗別の来店数を集計', observed[3])
-        self.assertIn('回答をまとめています', progress[-1])
+        self.assertTrue(progress[-1].startswith('データを取得・集計しています'))
+        self.assertFalse(any('回答をまとめ' in text or '分析を進め' in text for text in progress))
         self.assertFalse(any('SELECT' in message for message in progress))
 
     def test_different_literal_spaces_execute_separately(self):
@@ -178,7 +179,8 @@ class AgentTests(unittest.TestCase):
         progress = []
         answer = self.agent.run(self.contents, self.ctx, on_progress=progress.append)
         self.assertEqual(progress[0], 'データを取得・集計しています…')
-        self.assertIn('回答をまとめています', progress[-1])
+        self.assertTrue(progress[-1].startswith('データを取得・集計しています'))
+        self.assertFalse(any('回答をまとめ' in text or '分析を進め' in text for text in progress))
         self.assertEqual(answer.text, '完了')
         self.assertEqual([c.role for c in self.contents], ['user', 'model', 'user', 'model'])
         self.assertEqual(self.ctx.session_billed_bytes, 100)
