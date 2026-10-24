@@ -32,7 +32,7 @@ from src.bq_tools import (
     friendly_error,
     technical_detail,
 )
-from src.charts import ChartSpec
+from src.charts import ChartSpec, special_chart_spec
 from src.execution import BackgroundTurn, ExecutionStopped
 from src.commands import HELP, parse_command, usage_text, current_month_usage_text
 from src.command_menu import render_command_menu
@@ -483,7 +483,10 @@ def render_chart(df, spec: ChartSpec, key_prefix: str) -> None:
         kwargs["sort"] = False
         kwargs["stack"] = True if spec.color else False
     try:
-        CHART_FUNCS[spec.kind](df, **kwargs)
+        if spec.kind in ("pie", "heatmap"):
+            st.vega_lite_chart(df, special_chart_spec(spec), width="stretch")
+        else:
+            CHART_FUNCS[spec.kind](df, **kwargs)
     except Exception:  # noqa: BLE001
         st.warning("グラフを描画できなかったため、表で表示しています。")
         st.dataframe(df, hide_index=True)

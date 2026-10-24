@@ -275,3 +275,92 @@ render_chart(frame, ChartSpec(KIND, '月', ['件数'], color='店舗'), 'test')
             self.assertEqual(encoding['x']['field'], '月')
             if kind == 'bar':
                 self.assertTrue(encoding['y']['stack'])
+
+
+class AdditionalChartTests(unittest.TestCase):
+    def test_pie_uses_all_categories_without_top_ten_cutoff(self):
+        result = run(categories(12))
+        result.chart = {'kind': 'pie', 'x': '店舗', 'y': ['来店数']}
+        plan = choose_presentation('店舗の構成比を円グラフで', [result])
+        self.assertEqual(plan.mode, 'chart')
+        self.assertEqual(plan.chart.kind, 'pie')
+        self.assertEqual(len(plan.dataframe), 12)
+        result.truncated = True
+        self.assertEqual(choose_presentation('構成比', [result]).mode, 'table')
+
+    def test_pie_rejects_negative_zero_missing_or_duplicate_category_values(self):
+        for frame in (pd.DataFrame({'店舗': ['A', 'B'], '件数': [1, -1]}),
+                      pd.DataFrame({'店舗': ['A', 'B'], '件数': [0, 0]}),
+                      pd.DataFrame({'店舗': ['A', 'B'], '件数': [1, None]}),
+                      pd.DataFrame({'店舗': ['A', 'A'], '件数': [1, 2]}),
+                      pd.DataFrame({'店舗': ['A', 'B'], '件数': [1, float('inf')]})):
+            result = run(frame)
+            result.chart = {'kind': 'pie', 'x': '店舗', 'y': ['件数']}
+            self.assertEqual(choose_presentation('円グラフで', [result]).mode, 'table')
+
+    def test_heatmap_keeps_two_axes_and_does_not_fill_missing_cells(self):
+        df = pd.DataFrame({'時間帯': [9, 10, 10], '曜日': ['1 月', '1 月', '2 火'], '件数': [2, 3, 5]})
+        result = run(df)
+        result.chart = {'kind': 'heatmap', 'x': '時間帯', 'row': '曜日', 'y': ['件数']}
+        plan = choose_presentation('来店の多い曜日と時間帯をヒートマップで', [result])
+        self.assertEqual(plan.mode, 'chart')
+        self.assertEqual(plan.chart.row, '曜日')
+        pd.testing.assert_frame_equal(plan.dataframe, df)
+        result.chart['row'] = '存在しない'
+        self.assertEqual(choose_presentation('ヒートマップ', [result]).mode, 'table')
+        result.chart['row'] = '曜日'
+        result.dataframe = pd.concat([df, df.iloc[:1]], ignore_index=True)
+        self.assertEqual(choose_presentation('ヒートマップ', [result]).mode, 'table')
+
+    def test_special_charts_render_real_vega_specs_without_manual_controls(self):
+        import json
+        for kind in ('pie', 'heatmap'):
+            app = AppTest.from_string("""
+import pandas as pd
+from app import render_results
+from src.bq_tools import QueryRun
+frame = pd.DataFrame({'曜日': ['1 月', '2 火'], '時間帯': [9, 10], '来店数': [2, 3]})
+choice = {'kind': KIND, 'x': '曜日', 'y': ['来店数']}
+if KIND == 'heatmap':
+    choice['row'] = '時間帯'
+run = QueryRun('SELECT 1', 'SELECT 1', 0, 0, frame, {}, chart=choice)
+render_results({'question': 'グラフで', 'runs': [run]}, 0, set())
+""".replace('KIND', repr(kind))).run(timeout=20)
+            self.assertFalse(app.exception)
+            self.assertEqual(len(app.warning), 0)
+            self.assertEqual(len(app.selectbox), 0)
+            charts = app.get('vega_lite_chart')
+            self.assertEqual(len(charts), 1)
+            spec = json.loads(charts[0].proto.spec)
+            self.assertEqual(spec['mark']['type'], 'arc' if kind == 'pie' else 'rect')
+            self.assertEqual(spec['encoding']['color']['type'], 'nominal' if kind == 'pie' else 'quantitative')
+            if kind == 'heatmap':
+                self.assertEqual(spec['encoding']['y']['field'], '時間帯')
+                self.assertEqual(spec['encoding']['x']['field'], '曜日')
+            else:
+                self.assertEqual(spec['encoding']['theta']['field'], '来店数')
+
+    def test_multiple_numeric_series_share_one_line_chart(self):
+        import json
+        app = AppTest.from_string("""
+import pandas as pd
+from app import render_results
+from src.bq_tools import QueryRun
+frame = pd.DataFrame({'月': ['2026-01', '2026-02'], 'A店': [2, 3], 'B店': [5, 4]})
+choice = {'kind': 'line', 'x': '月', 'y': ['A店', 'B店']}
+run = QueryRun('SELECT 1', 'SELECT 1', 0, 0, frame, {}, chart=choice)
+render_results({'question': '店舗別推移', 'runs': [run]}, 0, set())
+""").run(timeout=20)
+        self.assertFalse(app.exception)
+        self.assertEqual(len(app.warning), 0)
+        charts = app.get('vega_lite_chart')
+        self.assertEqual(len(charts), 1)
+        spec = json.loads(charts[0].proto.spec)
+        encoding = spec.get('encoding') or spec['layer'][0]['encoding']
+        self.assertIn('color', encoding)
+
+    def test_literal_column_names_are_escaped_in_special_chart_specs(self):
+        from src.charts import ChartSpec, special_chart_spec
+        spec = special_chart_spec(ChartSpec('heatmap', '月.日', ['来店[数]'], row='店名'))
+        self.assertEqual(spec['encoding']['x']['field'], r'月\.日')
+        self.assertEqual(spec['encoding']['color']['field'], r'来店\[数\]')

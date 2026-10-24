@@ -140,6 +140,12 @@ run_query が error を返したら、内容を読んで SQL を修正し、最�
   最終回答用のrun_queryにはchartを指定する。文章だけで十分ならkind="none"、
   時間・日付・年月の推移は原則lineで横軸を時間、カテゴリ比較は原則barで横軸をカテゴリにする。
   数値同士の関係・相関を見るならscatter、量の推移や積み上げ構成を強調するならareaも検討する。
+  pieは全体に対する少数カテゴリ（目安6以下）の構成比に使う。xはカテゴリ、yは非負の数値1列、
+  colorは指定しない。全体を網羅するSQLにし、上位だけにLIMITした結果を全体の構成比として示さない。
+  heatmapは曜日×時間帯、店舗×月など2つの軸の組で濃淡を比較するときに使う。
+  xは横軸、rowは縦軸のカテゴリ、yは濃淡にする数値1列、colorは指定しない。
+  SQLではxとrowの組ごとに1行に集計し、欠けている組を根拠なく0に置き換えない。
+  曜日順は「1 月曜日」のような順序付きラベル、時間帯は数値で返し、時間・年月は横軸に置く。
   年月は時系列として正しく並ぶDATEやYYYY-MM形式、時間帯は数値でSQLに出力する。
   内訳が分析に必要な場合だけcolorにカテゴリ列を指定し、yは1つの数値列にする。
   例：月別・店舗別の来店数ならkind="line", x="月", y=["来店数"], color="店舗"。
@@ -383,10 +389,11 @@ def build_declarations() -> list[types.FunctionDeclaration]:
                         type=types.Type.OBJECT,
                         description="回答のグラフ指定。不要ならkind=none。種類・軸・内訳を質問に応じて判断する。",
                         properties={
-                            "kind": types.Schema(type=types.Type.STRING, enum=["none", "bar", "line", "area", "scatter"]),
+                            "kind": types.Schema(type=types.Type.STRING, enum=["none", "bar", "line", "area", "scatter", "pie", "heatmap"]),
                             "x": types.Schema(type=types.Type.STRING, description="時間・年月やカテゴリの横軸の出力列名"),
                             "y": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING), description="数値の出力列名。color使用時は1列"),
-                            "color": types.Schema(type=types.Type.STRING, description="必要な場合だけ指定する内訳のカテゴリ列名"),
+                            "color": types.Schema(type=types.Type.STRING, description="折れ線・棒などで必要な場合だけ指定する内訳列。円・ヒートマップでは指定しない"),
+                            "row": types.Schema(type=types.Type.STRING, description="heatmap専用。縦軸のカテゴリ列名（曜日・時間帯など）。xは横軸、yは色の濃淡に使う数値1列"),
                         },
                         required=["kind"],
                     ),

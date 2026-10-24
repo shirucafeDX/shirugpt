@@ -14,6 +14,8 @@ KIND_LABELS = {
     "line": "折れ線",
     "area": "面グラフ",
     "scatter": "散布図",
+    "pie": "円グラフ",
+    "heatmap": "ヒートマップ",
 }
 
 
@@ -26,6 +28,7 @@ class ChartSpec:
     candidates_x: list[str] = field(default_factory=list)
     candidates_y: list[str] = field(default_factory=list)
     color: str | None = None
+    row: str | None = None
 
 
 def _classify(df: pd.DataFrame) -> tuple[list[str], list[str], list[str]]:
@@ -127,4 +130,55 @@ def validate_chart(df: pd.DataFrame, value: object) -> ChartSpec | None:
         return None
     if color is not None and (not isinstance(color, str) or color not in df.columns or color == x or color in y or len(y) != 1):
         return None
-    return ChartSpec(kind=value["kind"], x=x, y=list(y), color=color)
+    row = value.get("row") or None
+    if value["kind"] in ("pie", "heatmap"):
+        if len(y) != 1 or color is not None:
+            return None
+        values = df[y[0]]
+        if values.isin([float("inf"), float("-inf")]).any() or values.dropna().empty:
+            return None
+        if value["kind"] == "pie":
+            # 負数・合計0や同じカテゴリの重複から、誤った構成比を作らない。
+            if (values.dropna() < 0).any() or values.isna().any() or values.sum() <= 0 or df.duplicated([x]).any():
+                return None
+        else:
+            if not isinstance(row, str) or row not in df.columns or row == x or row in y:
+                return None
+            if df.duplicated([x, row]).any():
+                return None
+    elif row is not None:
+        return None
+    if value["kind"] != "heatmap" and row is not None:
+        return None
+    return ChartSpec(kind=value["kind"], x=x, y=list(y), color=color, row=row)
+
+
+def special_chart_spec(spec: ChartSpec) -> dict:
+    """円・ヒートマップを描くVega-Lite指定。列名はネストしたフィールドとして解釈させない。"""
+    def field(column: str, kind: str) -> dict:
+        escaped = column.replace("\\", "\\\\").replace(".", "\\.").replace("[", "\\[").replace("]", "\\]")
+        return {"field": escaped, "type": kind, "title": column}
+
+    metric = field(spec.y[0], "quantitative")
+    if spec.kind == "pie":
+        category = field(spec.x, "nominal")
+        return {
+            "mark": {"type": "arc", "outerRadius": 130},
+            "encoding": {
+                "theta": {**metric, "stack": True},
+                "color": category,
+                "tooltip": [category, metric],
+            },
+        }
+    if spec.kind == "heatmap" and spec.row:
+        horizontal, vertical = field(spec.x, "ordinal"), field(spec.row, "ordinal")
+        return {
+            "mark": {"type": "rect"},
+            "encoding": {
+                "x": {**horizontal, "sort": "ascending"},
+                "y": {**vertical, "sort": "ascending"},
+                "color": {**metric, "scale": {"scheme": "blues"}},
+                "tooltip": [horizontal, vertical, metric],
+            },
+        }
+    raise ValueError("円グラフまたはヒートマップを指定してください。")

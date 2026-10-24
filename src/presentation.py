@@ -26,7 +26,7 @@ class Presentation:
 def explicit_format(question: str) -> str | None:
     if re.search(r"文章だけ|文章のみ|図表.*(?:不要|いらない|なし)|図表なし", question):
         return "none"
-    chart = re.search(r"グラフ|チャート|可視化|ヒストグラム|散布図|折れ線|棒グラフ", question)
+    chart = re.search(r"グラフ|チャート|可視化|ヒストグラム|散布図|折れ線|棒グラフ|ヒートマップ", question)
     table = re.search(r"表(?:で|に|形式|を(?:出|見|表示|作))|一覧|明細|リスト", question)
     no_chart = re.search(r"(?:グラフ|チャート)(?:は|を|も|が)?(?:不要|いらない|なし|出さない|表示しない)|グラフではなく", question)
     no_table = re.search(r"表(?:は|を|も|が)?(?:不要|いらない|なし|出さない|表示しない)|表ではなく", question)
@@ -68,6 +68,8 @@ def choose_presentation(
     spec = validate_chart(df, chart_choice) if chart_choice is not None else suggest_chart(df)
     if chart_choice is not None and spec is None:
         return Presentation(index, "table", note="グラフ指定・数値・集計粒度が適切でないため、表で表示しています。", signature=signature)
+    if spec is not None and spec.kind == "pie" and runs[index].truncated:
+        return Presentation(index, "table", note="結果が途中で切り捨てられているため、円グラフではなく表で表示しています。", signature=signature)
     chart_df = df
     # 単一数値列の明細も、分布の依頼ならサーバー内で度数分布にする。
     distribution = re.search(r"分布|ヒストグラム", question)
@@ -89,7 +91,7 @@ def choose_presentation(
         return Presentation(index=index)
 
     requested_kind = next((kind for word, kind in [("棒グラフ", "bar"), ("折れ線", "line"), ("散布図", "scatter"), ("面グラフ", "area")] if word in question), None)
-    if requested_kind:
+    if requested_kind and spec.kind not in ("pie", "heatmap"):
         spec = replace(spec, kind=requested_kind)
 
     note = ""
