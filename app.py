@@ -498,7 +498,7 @@ def render_chart(df, spec: ChartSpec, key_prefix: str) -> None:
     except Exception:  # noqa: BLE001 - 描画不能な組み合わせは表にフォールバック
         st.warning(
             "この列の組み合わせではグラフを描画できませんでした。"
-            "軸の指定を変えるか「データを見る」を開いてください。"
+            "軸の指定を変えるか「データ・実行詳細」を開いてください。"
         )
         return
     if spec.reason:
@@ -524,19 +524,16 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
         shown.add(plan.signature)
 
     # 回答に使った結果と途中結果を、必要なときだけ確認できるようにする。
-    hidden = [(i, run) for i, run in enumerate(runs)
-              if not (plan.mode == "table" and i == plan.index)]
-    if hidden:
-        with st.expander("データを見る"):
-            for idx, run in hidden:
-                st.caption(run.purpose or f"結果 {idx + 1}")
+    with st.expander("データ・実行詳細"):
+        for idx, run in enumerate(runs):
+            if idx:
+                st.divider()
+            st.caption(run.purpose or f"クエリ {idx + 1}")
+            if not (plan.mode == "table" and idx == plan.index):
                 if run.dataframe.empty:
                     st.info("このクエリの結果は 0 件でした。")
                 else:
                     render_table(run, idx, msg_idx)
-    with st.expander("実行詳細"):
-        for idx, run in enumerate(runs):
-            st.caption(run.purpose or f"クエリ {idx + 1}")
             st.code(run.sql, language="sql")
             st.caption(f"実行クエリ量: {human_bytes(run.billed_bytes)} · 結果件数: {len(run.dataframe):,} 件")
             for note in run.notes:
@@ -620,7 +617,11 @@ def render_sidebar(
 def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
     question = next((m["text"] for m in reversed(st.session_state.messages) if m["role"] == "user"), "")
     try:
-        result = agent.run(st.session_state.contents, ctx)
+        with st.status("質問に合う調べ方を考えています…", expanded=False) as status:
+            result = agent.run(
+                st.session_state.contents, ctx,
+                on_progress=lambda message: status.update(label=message),
+            )
         if isinstance(result, ConfirmationPending):
             st.session_state.pending = result
         elif isinstance(result, AnswerResult):
@@ -686,8 +687,7 @@ def render_confirmation(
     if approve or deny:
         ctx.decisions[pending.key] = "approved" if approve else "denied"
         st.session_state.pending = None
-        with st.spinner("処理中…"):
-            process_turn(agent, ctx)
+        process_turn(agent, ctx)
 
 
 # --------------------------------------------------------------------
@@ -761,8 +761,7 @@ def render_chat_page(
 
     with st.chat_message("user"):
         st.markdown(prompt)
-    with st.spinner("データベースを調べています…"):
-        process_turn(agent, ctx)
+    process_turn(agent, ctx)
 
 
 # --------------------------------------------------------------------

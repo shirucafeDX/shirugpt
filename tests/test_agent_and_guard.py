@@ -60,6 +60,41 @@ class AgentTests(unittest.TestCase):
         self.assertIsNotNone(self.contents[2].parts[0].function_response)
         self.assertEqual(self.contents[-1].parts[0].text, '結果です。')
 
+    def test_progress_describes_each_operation_before_it_executes(self):
+        progress = []
+        calls = [
+            types.FunctionCall(name='list_datasets', args={}),
+            types.FunctionCall(name='list_tables', args={'dataset': '店舗データ'}),
+            types.FunctionCall(name='get_table_schema', args={'dataset': '店舗データ', 'table': '来店'}),
+            types.FunctionCall(name='run_query', args={'sql': 'SELECT 1', 'purpose': '店舗別の来店数を集計'}),
+        ]
+        self.settings.max_tool_iterations = 5
+        replies = []
+        for call in calls:
+            reply = response('')
+            reply.candidates[0].content.parts = [types.Part(function_call=call)]
+            replies.append(reply)
+        self.agent._generate = Mock(side_effect=[*replies, response('完了')])
+        observed = []
+
+        def dispatch(call, ctx):
+            observed.append(progress[-1])
+            if call.name == 'run_query':
+                ctx.turn_runs.append(QueryRun('SELECT 1', 'SELECT 1', 0, 0, pd.DataFrame({'n': [1]}), {}))
+            return types.Part.from_function_response(name=call.name, response={})
+
+        self.agent._dispatch = Mock(side_effect=dispatch)
+        self.agent.run(self.contents, self.ctx, on_progress=progress.append)
+        self.assertIn('調べ方', progress[0])
+        self.assertIn('データセット', observed[0])
+        self.assertIn('店舗データ', observed[1])
+        self.assertIn('テーブル一覧', observed[1])
+        self.assertIn('店舗データ.来店', observed[2])
+        self.assertIn('列名・データ型', observed[2])
+        self.assertIn('店舗別の来店数を集計', observed[3])
+        self.assertIn('回答をまとめています', progress[-1])
+        self.assertFalse(any('SELECT' in message for message in progress))
+
     def test_different_literal_spaces_execute_separately(self):
         def query(sql, **kwargs):
             return QueryRun(sql, sql, 0, 100, pd.DataFrame({'value': [sql]}), {})
@@ -140,7 +175,10 @@ class AgentTests(unittest.TestCase):
         self.assertIsInstance(pending, ConfirmationPending)
         self.assertEqual(len(self.contents), 2)
         self.ctx.decisions[pending.key] = 'approved'
-        answer = self.agent.run(self.contents, self.ctx)
+        progress = []
+        answer = self.agent.run(self.contents, self.ctx, on_progress=progress.append)
+        self.assertEqual(progress[0], 'データを取得・集計しています…')
+        self.assertIn('回答をまとめています', progress[-1])
         self.assertEqual(answer.text, '完了')
         self.assertEqual([c.role for c in self.contents], ['user', 'model', 'user', 'model'])
         self.assertEqual(self.ctx.session_billed_bytes, 100)

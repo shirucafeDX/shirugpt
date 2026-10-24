@@ -87,6 +87,6 @@ def choose_presentation(
     if spec.kind == "bar" and len(chart_df) > 10:
         y = spec.y[0]
         chart_df = chart_df.nlargest(10, y) if pd.api.types.is_numeric_dtype(chart_df[y]) else chart_df.head(10)
-        note = f"「{y}」の上位10件を表示しています。全件は「データを見る」で確認できます。"
+        note = f"「{y}」の上位10件を表示しています。全件は「データ・実行詳細」で確認できます。"
     spec = replace(spec, reason="")
     return Presentation(index, "chart", spec, chart_df, note, signature)

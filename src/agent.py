@@ -16,7 +16,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from google import genai
 from google.genai import types
@@ -87,6 +87,8 @@ run_query が error を返したら、内容を読んで SQL を修正し、最�
 - run_query の result_role は、探索・検証・途中計算なら supporting、
   質問の結論に使う結果なら answer を指定する。画面は最後の answer のみを表示候補にする。
   推移・分布・比較の回答用クエリは、必要な系列を1つの結果にまとめる。
+- run_query の purpose には「店舗別の来店数を集計」のように、何を確認するかを
+  短い日本語で必ず指定する。実行中の進捗と実行詳細に表示される。
 - 日本語で、データにない内容を推測で補わない。
 - 質問の種類によって長さを変える。
   - 件数・合計・単純な集計結果など「事実を聞かれただけ」の質問には、
@@ -103,6 +105,21 @@ run_query が error を返したら、内容を読んで SQL を修正し、最�
 
 def _sql_key(sql: str) -> str:
     return hashlib.sha256(sql.strip().encode("utf-8")).hexdigest()
+
+
+def tool_progress(call: Any) -> str:
+    """ツールの実行内容を、SQL を出さず短い日本語で伝える。"""
+    args = dict(call.args or {})
+    if call.name == "list_datasets":
+        return "利用できるデータセットを確認しています…"
+    if call.name == "list_tables":
+        return f"「{args.get('dataset', '')}」のテーブル一覧を確認しています…"
+    if call.name == "get_table_schema":
+        return f"「{args.get('dataset', '')}.{args.get('table', '')}」の列名・データ型を確認しています…"
+    if call.name == "run_query":
+        purpose = str(args.get("purpose") or "").strip()
+        return f"データを取得・集計しています：{purpose}" if purpose else "データを取得・集計しています…"
+    return "調査に必要な情報を確認しています…"
 
 
 @dataclass
@@ -480,7 +497,8 @@ class GeminiAgent:
 
     # -- ループ本体 ---------------------------------------------------
     def run(
-        self, contents: list[types.Content], ctx: ToolContext
+        self, contents: list[types.Content], ctx: ToolContext,
+        on_progress: Callable[[str], None] | None = None,
     ) -> AnswerResult | ConfirmationPending:
         """1 ターンを最後まで進める。確認が必要な場合は中断して状態を残す。
 
@@ -488,9 +506,16 @@ class GeminiAgent:
         """
         pending_calls = ctx.resume_calls
         ctx.resume_calls = None
+        processed_tools = False
 
         for _ in range(self.settings.max_tool_iterations):
             if pending_calls is None:
+                if on_progress is not None:
+                    on_progress(
+                        "取得したデータを確認し、回答をまとめています…" if ctx.turn_runs else
+                        "確認した情報をもとに、分析を進めています…" if processed_tools else
+                        "質問に合う調べ方を考えています…"
+                    )
                 try:
                     response = self._generate(contents)
                 except Exception as exc:  # noqa: BLE001 - 記録してから同じ例外を上に伝える
@@ -576,7 +601,11 @@ class GeminiAgent:
                 pending_calls = calls
 
             try:
-                responses = [self._dispatch(call, ctx) for call in pending_calls]
+                responses = []
+                for call in pending_calls:
+                    if on_progress is not None:
+                        on_progress(tool_progress(call))
+                    responses.append(self._dispatch(call, ctx))
             except _Pending as pending:
                 # ここで中断。承認後に同じ pending_calls から再開する。
                 ctx.resume_calls = pending_calls
@@ -589,6 +618,7 @@ class GeminiAgent:
                 )
 
             contents.append(types.Content(role="user", parts=responses))
+            processed_tools = True
             pending_calls = None
 
         self._record_generation_issue(

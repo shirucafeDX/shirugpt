@@ -116,6 +116,29 @@ class PresentationTests(unittest.TestCase):
 
 
 class StreamlitRenderingTests(unittest.TestCase):
+    def test_turn_updates_status_with_query_purpose(self):
+        source = '''
+from types import SimpleNamespace
+from unittest.mock import patch
+import streamlit as st
+from app import process_turn
+from src.agent import AnswerResult
+
+class Agent:
+    def run(self, contents, ctx, on_progress):
+        on_progress('データを取得・集計しています：店舗別の来店数を集計')
+        return AnswerResult('回答です')
+
+st.session_state.messages = [{'role': 'user', 'text': '店舗別の来店数は？'}]
+st.session_state.contents = []
+ctx = SimpleNamespace(turn_runs=[], turn_errors=[], usage_logger=None)
+with patch('app.save_conversation'), patch('app.st.rerun'):
+    process_turn(Agent(), ctx)
+'''
+        app = AppTest.from_string(source).run(timeout=20)
+        self.assertEqual(len(app.exception), 0, [str(e) for e in app.exception])
+        self.assertEqual(app.status[0].label, 'データを取得・集計しています：店舗別の来店数を集計')
+
     def render(self, question, scalar=False, error=False):
         source = f'''
 import pandas as pd
@@ -131,8 +154,10 @@ render_message({{'role':'assistant','text':'回答です','question':{question!r
 
     def test_scalar_has_only_collapsed_data_and_details(self):
         app = self.render('件数は？', scalar=True)
-        self.assertEqual([e.label for e in app.expander], ['データを見る', '実行詳細'])
+        self.assertEqual([e.label for e in app.expander], ['データ・実行詳細'])
         self.assertTrue(all(not e.proto.expanded for e in app.expander))
+        self.assertEqual(len(app.expander[0].dataframe), 1)
+        self.assertEqual(app.expander[0].code[0].value, 'SELECT 1')
         self.assertEqual(len(app.selectbox), 0)
 
     def test_chart_and_axis_interaction(self):
@@ -145,7 +170,9 @@ render_message({{'role':'assistant','text':'回答です','question':{question!r
     def test_explicit_table_is_visible_without_data_expander(self):
         app = self.render('一覧にして')
         self.assertEqual(len(app.dataframe), 1)
-        self.assertEqual([e.label for e in app.expander], ['実行詳細'])
+        self.assertEqual([e.label for e in app.expander], ['データ・実行詳細'])
+        self.assertEqual(len(app.expander[0].dataframe), 0)
+        self.assertEqual(app.expander[0].code[0].value, 'SELECT 1')
         self.assertEqual(len(app.selectbox), 0)
 
     def test_error_never_promotes_a_chart(self):
