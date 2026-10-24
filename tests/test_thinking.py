@@ -44,12 +44,33 @@ class ThinkingTests(unittest.TestCase):
             self.assertEqual(config.thinking_config.thinking_level.value, expected)
             self.assertIsNone(config.thinking_config.thinking_budget)
             self.assertTrue(config.system_instruction.startswith(SYSTEM_INSTRUCTION))
-            self.assertIn(f'今回の分析方針（{expected.lower()}）', config.system_instruction)
+            self.assertEqual(config.system_instruction, SYSTEM_INSTRUCTION)
             self.assertEqual(call.kwargs['model'], 'gemini-3.8-flash')
         self.assertIsNone(agent.thinking_level)
         self.assertEqual(normal.thinking_mode, 'medium')
         self.assertIn('件数です', calls[-1].kwargs['contents'][1].parts[0].text)
         self.assertAlmostEqual(normal.gemini_cost_usd(), 2 * gemini_cost_usd(10, 10, 'gemini-3.8-flash'))
+
+    def test_low_and_thinking_have_independent_prompts_and_persist(self):
+        client = Mock()
+        client.models.generate_content.return_value = response('検証結果です')
+        agent = GeminiAgent(settings(), client=client)
+        ctx = ToolContext(tools=Mock(), settings=agent.settings, thinking_mode='low')
+        agent.run([user('質問')], ctx)
+        config = client.models.generate_content.call_args.kwargs['config']
+        self.assertEqual(config.thinking_config.thinking_level.value, 'LOW')
+        self.assertEqual(config.system_instruction, SYSTEM_INSTRUCTION)
+        ctx.thinking_enabled = True
+        ctx.thinking_previous_effort = 'low'
+        ctx.thinking_mode = 'high'
+        agent.run([user('詳細に分析')], ctx)
+        config = client.models.generate_content.call_args.kwargs['config']
+        self.assertEqual(config.thinking_config.thinking_level.value, 'HIGH')
+        self.assertIn('詳細分析モード', config.system_instruction)
+        restored = ToolContext(tools=Mock(), settings=settings())
+        unpack(pack([], [], ctx, None), restored)
+        self.assertTrue(restored.thinking_enabled)
+        self.assertEqual(restored.thinking_previous_effort, 'low')
 
     def test_pending_query_keeps_the_level_used_before_confirmation(self):
         client = Mock()
@@ -86,10 +107,11 @@ class ThinkingTests(unittest.TestCase):
         restored = ToolContext(tools=Mock(), settings=settings())
         unpack(pack([], [], ctx, None), restored)
         self.assertEqual(restored.thinking_mode, 'medium')
-        self.assertEqual(restored.active_thinking_level, 'medium')
+        self.assertEqual(restored.active_thinking_level, 'low')
 
-    def test_thinking_commands_change_only_local_mode_and_reject_invalid_arguments(self):
-        for argument, initial, expected in [('high', 'medium', 'high'), ('medium', 'high', 'medium'), ('low', 'medium', 'medium')]:
+    def test_removed_command_and_effort_arguments_do_not_change_mode(self):
+        for command in ('/thinking high', '/effort high', '/effort medium', '/effort midium'):
+            initial, expected = 'medium', 'medium'
             source = '''
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -104,7 +126,7 @@ with patch('app.st.rerun'), patch('app.save_conversation') as save:
     handle_command(COMMAND, ctx, ctx.settings, ctx.tools, Mock(), '', None, 0)
 st.session_state['mode'] = ctx.thinking_mode
 st.session_state['tools_called'] = bool(ctx.tools.mock_calls)
-'''.replace('INITIAL', repr(initial)).replace('COMMAND', repr('/thinking ' + argument))
+'''.replace('INITIAL', repr(initial)).replace('COMMAND', repr(command))
             app = AppTest.from_string(source).run(timeout=20)
             self.assertFalse(app.exception)
             self.assertEqual(app.session_state['mode'], expected)

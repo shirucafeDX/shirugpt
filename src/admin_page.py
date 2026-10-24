@@ -133,7 +133,7 @@ def _render_settings_tab(settings: Settings) -> None:
     st.subheader("現在適用中の設定")
     st.caption("起動時に読み込んだ設定です。環境変数や Secrets の変更後はアプリを再起動してください。")
     thinking = (
-        "medium（/thinking highでhigh）" if settings.gemini_model == "gemini-3.8-flash" else
+        "Medium（/effortでLow・Medium・Highを選択）" if settings.gemini_model == "gemini-3.8-flash" else
         "未指定（モデル既定）" if settings.thinking_budget is None else
         "動的（-1）" if settings.thinking_budget == -1 else
         "無効（0）" if settings.thinking_budget == 0 else

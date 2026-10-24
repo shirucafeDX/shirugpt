@@ -195,7 +195,7 @@ def init_state(
         st.session_state.ctx = _new_context(
             settings, tools, usage_logger, user_email
         )
-    if st.session_state.ctx.thinking_mode not in ("medium", "high"):
+    if st.session_state.ctx.thinking_mode not in ("low", "medium", "high"):
         st.session_state.ctx.thinking_mode = "medium"
     return st.session_state.ctx
 
@@ -221,6 +221,7 @@ def reset_conversation(
     st.session_state.pending = None
     st.session_state.ctx = _new_context(settings, tools, usage_logger, user_email)
     st.session_state.pop("command_output", None)
+    st.session_state.pop("effort_panel", None)
     st.session_state.conversation_owner = user_email
     st.session_state.history_id = uuid.uuid4().hex
     st.session_state.history_generation = 0
@@ -847,6 +848,56 @@ def render_confirmation(
 # --------------------------------------------------------------------
 # ページ
 # --------------------------------------------------------------------
+def set_effort(ctx: ToolContext, mode: str) -> str:
+    if mode not in ("low", "medium", "high"):
+        return "`/effort` の選択画面でLow、Medium、Highを選んでください。"
+    if ctx.settings.gemini_model != "gemini-3.8-flash":
+        return "この思考設定はGemini 3.8 Flashに対応しています。GEMINI_MODELの設定を確認してください。"
+    if st.session_state.get("pending") is not None:
+        return "実行確認待ちです。現在のクエリを実行または中止してから思考設定を変更してください。"
+    ctx.thinking_mode = mode
+    if st.session_state.messages:
+        save_conversation(ctx)
+    return f"effortを **{mode.title()}** に切り替えました。会話とプロンプトは維持します。"
+
+
+def render_effort_panel(ctx: ToolContext) -> None:
+    with st.container(border=True, key="effort_picker"):
+        st.markdown(f"思考レベル：**{ctx.thinking_mode.title()}**")
+        disabled = st.session_state.get("pending") is not None or ctx.settings.gemini_model != "gemini-3.8-flash"
+        with st.container(horizontal=True):
+            for number, (mode, label) in enumerate((("low", "Low"), ("medium", "Medium"), ("high", "High")), start=1):
+                if st.button(f"{number}. {label}", key=f"effort_{mode}", disabled=disabled, shortcut=str(number),
+                             type="primary" if ctx.thinking_mode == mode else "secondary"):
+                    st.session_state.command_output = set_effort(ctx, mode)
+                    st.rerun()
+        st.caption("Low / Medium / High：モデルの思考量を調整します。プロンプトは変更しません。1・2・3で切り替え、↑↓で移動、Enterで確定できます。文字入力中は数字キーで切り替わりません。")
+        if disabled:
+            st.caption("実行確認待ち、または対応外モデルのため変更できません。")
+        if st.button("閉じる", key="close_effort_panel"):
+            st.session_state.pop("effort_panel", None)
+            st.rerun()
+
+
+def render_prompt_input(ctx: ToolContext) -> str | None:
+    color = {"low": "#0d9488", "medium": "#3b82f6", "high": "#8b5cf6"}.get(ctx.thinking_mode, "#3b82f6")
+    st.markdown("""
+<style>
+.st-key-prompt_input [data-testid="stChatInput"] {
+    border: 2px solid __COLOR__;
+    border-radius: 1rem;
+}
+.st-key-prompt_input [data-testid="stChatInput"]:focus-within {
+    border-color: __COLOR__;
+    box-shadow: 0 0 0 2px __COLOR__33;
+}
+</style>
+""".replace("__COLOR__", color), unsafe_allow_html=True)
+    prompt = st.chat_input("質問、または /help などのコマンドを入力", key="prompt_input")
+    return prompt
+
+
+
 def handle_command(prompt, ctx, settings, tools, usage_logger, user_email,
                    monthly_used_usd, monthly_limit_usd) -> bool:
     command = parse_command(prompt)
@@ -879,23 +930,32 @@ def handle_command(prompt, ctx, settings, tools, usage_logger, user_email,
             return True
     elif command.name == "/model" and not command.argument:
         output = f"使用中のモデル：`{ctx.settings.gemini_model}`"
-    elif command.name == "/thinking":
-        mode = command.argument.lower()
-        if not mode:
-            output = (f"思考設定：**{ctx.thinking_mode}**（直近の実行：{ctx.active_thinking_level}）。\n\n"
-                      "`/thinking high` でhighを指定し、`/thinking medium` で通常設定へ戻します。")
-        elif mode not in ("medium", "high"):
-            output = "`/thinking high` または `/thinking medium` を指定してください。"
+    elif command.name == "/thinking" and not command.argument:
+        if st.session_state.get("pending") is not None:
+            output = "実行確認待ちです。現在のクエリを実行または中止してから変更してください。"
         elif ctx.settings.gemini_model != "gemini-3.8-flash":
-            output = "この思考設定はGemini 3.8 Flashに対応しています。GEMINI_MODELの設定を確認してください。"
-        elif st.session_state.get("pending") is not None:
-            output = "実行確認待ちです。現在のクエリを実行または中止してから思考設定を変更してください。"
+            output = "このモードはGemini 3.8 Flashに対応しています。"
         else:
-            ctx.thinking_mode = mode
+            if ctx.thinking_enabled:
+                ctx.thinking_enabled = False
+                previous = ctx.thinking_previous_effort
+                ctx.thinking_mode = previous if previous in ("low", "medium", "high") else "medium"
+                output = f"詳細分析モードを解除しました。effortは **{ctx.thinking_mode.title()}** に戻りました。"
+            else:
+                ctx.thinking_previous_effort = ctx.thinking_mode
+                ctx.thinking_enabled = True
+                ctx.thinking_mode = "high"
+                output = "詳細分析モードを有効にしました。effortは **High** です。多角的な検証と詳しい説明の指示を追加します。"
             if st.session_state.messages:
                 save_conversation(ctx)
-            output = ("**high** に切り替えました。次の質問から、複数の観点で検証する分析方針を適用します。"
-                      if mode == "high" else "**medium** に戻しました。通常の分析方針を適用します。")
+    elif command.name == "/effort":
+        if not command.argument:
+            st.session_state.effort_panel = True
+            st.session_state.pop("command_output", None)
+            st.rerun()
+            return True
+        else:
+            output = "`/effort` を引数なしで入力し、選択画面からLow、Medium、Highを選んでください。"
     else:
         output = "コマンドまたは引数を確認してください。利用できるコマンドは `/help` で確認できます。"
     st.session_state.command_output = output
@@ -918,7 +978,8 @@ def render_chat_page(
         st.error(f"⚠️ {leak}")
 
     ctx = init_state(settings, tools, usage_logger, user_email)
-    st.caption(f"{ctx.settings.gemini_model} · 思考：{ctx.thinking_mode}")
+    st.caption(f"{ctx.settings.gemini_model} · effort：{ctx.thinking_mode.title()}"
+               + (" · 詳細分析モード" if ctx.thinking_enabled else ""))
 
     monthly_used_usd = None
     if user_email and settings.logging_enabled:
@@ -943,7 +1004,8 @@ def render_chat_page(
         last_message.get("clarification") and not last_message["clarification"].get("answered")
     )
     if awaiting_clarification:
-        render_clarification(last_message, len(st.session_state.messages) - 1, agent, ctx, blocked)
+        render_clarification(last_message, len(st.session_state.messages) - 1, agent, ctx,
+                             blocked or bool(st.session_state.get("effort_panel")))
 
     pending = st.session_state.pending
     if pending is not None:
@@ -964,9 +1026,10 @@ def render_chat_page(
                 st.session_state.pop("command_output", None)
                 st.rerun()
 
-    prompt = st.chat_input(
-        "質問、または /help などのコマンドを入力",
-    )
+    if st.session_state.get("effort_panel"):
+        render_effort_panel(ctx)
+
+    prompt = render_prompt_input(ctx)
     if not prompt:
         if not st.session_state.messages and pending is None and not blocked:
             st.info(

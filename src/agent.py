@@ -31,7 +31,7 @@ from .bq_tools import (
     technical_detail,
 )
 from .config import Settings, human_bytes, gemini_cost_usd
-from .thinking import PROFILES
+from .thinking import DEEP_ANALYSIS_INSTRUCTION
 from .sql_guard import SQLGuardError
 from .usage_log import UsageLogger
 from .execution import ExecutionControl, ExecutionStopped
@@ -191,6 +191,8 @@ class ToolContext:
     decisions: dict[str, str] = field(default_factory=dict)
     resume_calls: list[Any] | None = None
     execution_control: ExecutionControl | None = None
+    thinking_enabled: bool = False
+    thinking_previous_effort: str = "medium"
     thinking_mode: str = "medium"
     active_thinking_level: str = "medium"
 
@@ -381,9 +383,10 @@ def build_declarations() -> list[types.FunctionDeclaration]:
 
 class GeminiAgent:
     def __init__(self, settings: Settings, client: genai.Client | None = None,
-                 thinking_level: str | None = None):
+                 thinking_level: str | None = None, deep_analysis: bool = False):
         self.settings = settings
         self.thinking_level = thinking_level
+        self.deep_analysis = deep_analysis
         self.client = client or genai.Client(
             vertexai=True,
             project=settings.gcp_project,
@@ -394,7 +397,7 @@ class GeminiAgent:
     # -- 生成 ---------------------------------------------------------
     def _config(self) -> types.GenerateContentConfig:
         kwargs: dict[str, Any] = {
-            "system_instruction": SYSTEM_INSTRUCTION + PROFILES.get(self.thinking_level, ""),
+            "system_instruction": SYSTEM_INSTRUCTION + (DEEP_ANALYSIS_INSTRUCTION if self.deep_analysis else ""),
             "tools": [types.Tool(function_declarations=self.declarations)],
             "temperature": 0.1,
             "automatic_function_calling": types.AutomaticFunctionCallingConfig(
@@ -689,10 +692,10 @@ class GeminiAgent:
         """
         if getattr(self.settings, "gemini_model", "") == "gemini-3.8-flash" and self.thinking_level is None:
             if ctx.resume_calls is None:
-                ctx.active_thinking_level = "high" if ctx.thinking_mode == "high" else "medium"
+                ctx.active_thinking_level = ctx.thinking_mode if ctx.thinking_mode in ("low", "medium", "high") else "medium"
             # 共用のエージェントを変更せず、今回のターンにだけ設定を固定する。
             turn_agent = GeminiAgent(self.settings, client=self.client,
-                                     thinking_level=ctx.active_thinking_level)
+                                     thinking_level=ctx.active_thinking_level, deep_analysis=ctx.thinking_enabled)
             return turn_agent.run(contents, ctx, on_progress=on_progress)
         pending_calls = ctx.resume_calls
         ctx.resume_calls = None

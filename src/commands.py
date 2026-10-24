@@ -13,9 +13,8 @@ HELP = """\
 | `/model` | 使用中のモデルを表示 |
 | `/new` | 新しいチャットを開始 |
 | `/usage` | 当月のInput・Output（思考を含む）、クエリ量、費用と残額 |
-| `/thinking` | 思考設定を表示 |
-| `/thinking high` | highを明示指定（解除するまで継続） |
-| `/thinking medium` | 通常設定へ戻す（既定） |
+| `/thinking` | 詳細分析モードを切り替え。有効時High、解除時は元のeffortへ戻す |
+| `/effort` | Low / Medium / Highを選択（1・2・3、上下キーにも対応） |
 
 コマンドはアプリ内で処理し、Geminiへ送信しません。
 """

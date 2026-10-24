@@ -25,6 +25,7 @@ CONTEXT_FIELDS = (
     'session_output_tokens', 'session_total_tokens', 'session_billed_bytes',
     'session_thinking_tokens',
     'thinking_mode', 'active_thinking_level', 'session_gemini_cost_usd',
+    'thinking_enabled', 'thinking_previous_effort',
     'session_id', 'turn_id',
 )
 
@@ -116,6 +117,9 @@ def unpack(data, ctx):
         for key in CONTEXT_FIELDS:
             if key in context:
                 setattr(ctx, key, context[key])
+        ctx.thinking_enabled = context.get('thinking_enabled') is True
+        previous = context.get('thinking_previous_effort', 'medium')
+        ctx.thinking_previous_effort = previous if previous in ('low', 'medium', 'high') else 'medium'
         if 'session_thinking_tokens' not in context:
             ctx.session_thinking_tokens = None
         messages, contents = decode(payload['messages']), decode(payload['contents'])
@@ -129,9 +133,9 @@ def unpack(data, ctx):
                 messages.append({'role': 'assistant', 'text': 'モデルが変更されたため、以前の実行確認は解除しました。必要に応じて、もう一度質問してください。'})
             pending = None
             ctx.resume_calls = None
-        if ctx.thinking_mode not in ('medium', 'high'):
+        if ctx.thinking_mode not in ('low', 'medium', 'high'):
             ctx.thinking_mode = 'medium'
-        if ctx.active_thinking_level not in ('medium', 'high'):
+        if ctx.active_thinking_level not in ('low', 'medium', 'high'):
             ctx.active_thinking_level = 'medium'
         if payload['status'] == 'running':
             text = '前回の処理は中断されました。必要に応じて、もう一度質問してください。'

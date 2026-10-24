@@ -31,7 +31,7 @@ logger.get_limits.assert_not_called()
         self.assertEqual([tab.label for tab in app.tabs], ['利用状況', '使用制限', '実行設定'])
         values = app.dataframe[0].value.set_index('設定項目')['適用値']
         self.assertEqual(values['Gemini に渡すサンプル行数'], '100 行')
-        self.assertIn('medium（/thinking highでhigh）', values['思考設定'])
+        self.assertIn('Medium（/effortでLow・Medium・Highを選択）', values['思考設定'])
         rendered = app.dataframe[0].value.to_string()
         self.assertNotIn('admin@example.com', rendered)
         self.assertNotIn('credentials', rendered)
