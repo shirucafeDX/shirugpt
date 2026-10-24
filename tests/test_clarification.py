@@ -132,6 +132,8 @@ if 'ctx' not in st.session_state:
     st.session_state.messages = [{'role': 'user', 'text': '来店数をグラフで比較して'}]
     st.session_state.contents = [types.Content(role='user', parts=[types.Part.from_text(text='来店数をグラフで比較して')])]
     process_turn(agent, st.session_state.ctx)
+if st.session_state.get('active_turn') is not None:
+    process_turn(agent, st.session_state.ctx)
 for i, message in enumerate(st.session_state.messages):
     render_message(message, i)
 last = st.session_state.messages[-1]

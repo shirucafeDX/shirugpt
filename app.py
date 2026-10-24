@@ -633,13 +633,15 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
     try:
         st.markdown("""
 <style>
+.st-key-prompt_input [data-testid="stChatInputSubmitButton"] { visibility: hidden; }
+.st-key-execution_stop { position: fixed; display: none; z-index: 10001; }
 .st-key-execution_stop button {
-    border-radius: 50%; width: 2.75rem; height: 2.75rem;
-    min-height: 2.75rem; padding: 0; border: none;
+    border-radius: 50%; width: 2rem; height: 2rem;
+    min-height: 2rem; padding: 0; border: none;
     background: transparent; color: inherit;
 }
 .st-key-execution_stop button::before {
-    content: ""; display: block; width: 2.75rem; height: 2.75rem;
+    content: ""; display: block; width: 2rem; height: 2rem;
     background: currentColor;
     mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 44'%3E%3Cpath fill-rule='evenodd' d='M22 1a21 21 0 1 0 0 42a21 21 0 1 0 0-42M16 16h12v12H16z'/%3E%3C/svg%3E") center / contain no-repeat;
 }
@@ -660,6 +662,7 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
             on_click=task.control.request_stop,
             disabled=task.done.is_set() or task.control.stopped.is_set(),
         )
+        render_prompt_input(ctx, running=True)
         with st.status("質問に合う調べ方を考えています…", expanded=False) as status:
             while not task.done.wait(timeout=0.2):
                 # このUI更新でStreamlitに制御を返し、停止クリックによる再実行を受ける。
@@ -770,9 +773,12 @@ def submit_prompt(
             prompt_text=prompt,
         )
     save_conversation(ctx, "running")
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    process_turn(agent, ctx)
+    # 入力ウィジェットを実行中の表示へ切り替えてから処理を描画する。
+    # 同じ再実行内で同じchat_inputを二度作らない。
+    task = BackgroundTurn(agent, st.session_state.contents, ctx)
+    st.session_state.active_turn = task
+    task.start()
+    st.rerun()
 
 
 def toggle_clarification_choice(choice_key: str, option: str, selection_mode: str) -> None:
@@ -877,9 +883,9 @@ def set_effort(ctx: ToolContext, mode: str) -> str | None:
     return None
 
 
-def render_prompt_input(ctx: ToolContext) -> str | None:
+def render_prompt_input(ctx: ToolContext, *, running: bool = False) -> str | None:
     mode = st.session_state.pop("keyboard_effort", None)
-    if mode is not None:
+    if mode is not None and not running:
         error = set_effort(ctx, mode)
         st.session_state.pop("effort_panel", None)
         if error:
@@ -906,9 +912,9 @@ def render_prompt_input(ctx: ToolContext) -> str | None:
 }
 </style>
 """.replace("__COLOR__", color), unsafe_allow_html=True)
-    prompt = st.chat_input("質問、または /help などのコマンドを入力", key="prompt_input")
-    render_command_menu(effort_open=bool(st.session_state.get("effort_panel")),
-                        effort=getattr(ctx, "thinking_mode", "medium"))
+    prompt = st.chat_input("処理中…" if running else "質問、または /help などのコマンドを入力", key="prompt_input", disabled=running)
+    render_command_menu(effort_open=bool(st.session_state.get("effort_panel")) and not running,
+                        effort=getattr(ctx, "thinking_mode", "medium"), running=running)
     return st.session_state.pop("keyboard_command", None) or prompt
 
 

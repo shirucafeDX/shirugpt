@@ -24,7 +24,7 @@ def _keyboard_event() -> None:
         st.session_state["clarification_keyboard"] = payload
 
 
-def render_command_menu(*, effort_open=False, effort="medium") -> None:
+def render_command_menu(*, effort_open=False, effort="medium", running=False) -> None:
     # アプリの実行環境ごとに登録する（AppTestも独立した環境を作る）。
     menu = components.component("slash_command_menu", js=_JS, isolate_styles=False)
-    menu(key="slash_command_menu", data={"commands": COMMAND_SUGGESTIONS, "effort_open": effort_open, "effort": effort}, height=0, on_action_change=_keyboard_event)
+    menu(key="slash_command_menu", data={"commands": COMMAND_SUGGESTIONS, "effort_open": effort_open, "effort": effort, "running": running}, height=0, on_action_change=_keyboard_event)

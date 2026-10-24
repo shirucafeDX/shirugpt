@@ -58,6 +58,12 @@ export default function ({ data, parentElement, setTriggerValue }) {
   }
 
   function position() {
+    const stop = document.querySelector('.st-key-execution_stop');
+    const arrow = document.querySelector('.st-key-prompt_input [data-testid="stChatInputSubmitButton"]');
+    if (stop && arrow && data?.running) {
+      const rect = arrow.getBoundingClientRect();
+      Object.assign(stop.style, {display: "block", left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`});
+    }
     if (!input || menu.hidden) return;
     const rect = input.closest('[data-testid="stChatInput"]').getBoundingClientRect();
     const theme = getComputedStyle(parentElement);

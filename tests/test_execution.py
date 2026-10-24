@@ -123,3 +123,36 @@ st.session_state['resume_cleared'] = ctx.resume_calls is None
         contents = app.session_state.contents
         self.assertEqual(contents[-2].parts[0].function_response.id, 'call-1')
         self.assertEqual(contents[-1].parts[0].text, '処理を停止しました。')
+
+
+class PromptExecutionUITests(unittest.TestCase):
+    def test_normal_submission_replaces_input_without_duplicate_widgets(self):
+        source = '''
+from types import SimpleNamespace
+from unittest.mock import Mock
+import streamlit as st
+from app import render_prompt_input, submit_prompt, process_turn
+from src.agent import ToolContext, AnswerResult
+class Agent:
+    def run(self, contents, ctx, on_progress):
+        return AnswerResult('確認完了')
+if 'ctx' not in st.session_state:
+    st.session_state.ctx = ToolContext(tools=Mock(), settings=SimpleNamespace(gemini_model='gemini-3.8-flash', chat_history_bucket=''))
+    st.session_state.messages=[]
+    st.session_state.contents=[]
+    st.session_state.pending=None
+ctx=st.session_state.ctx
+if st.session_state.get('active_turn') is not None:
+    process_turn(Agent(), ctx)
+else:
+    prompt=render_prompt_input(ctx)
+    if prompt:
+        submit_prompt(prompt, Agent(), ctx)
+'''
+        app = AppTest.from_string(source).run(timeout=20)
+        app.chat_input[0].set_value('質問です').run()
+        self.assertFalse(app.exception)
+        self.assertEqual([m['text'] for m in app.session_state.messages], ['質問です', '確認完了'])
+        self.assertEqual(len(app.chat_input), 1)
+        self.assertFalse(app.chat_input[0].disabled)
+        self.assertNotIn('active_turn', app.session_state)
