@@ -30,7 +30,8 @@ from .bq_tools import (
     friendly_error,
     technical_detail,
 )
-from .config import Settings, human_bytes
+from .config import Settings, human_bytes, gemini_cost_usd
+from .thinking import PROFILES
 from .sql_guard import SQLGuardError
 from .usage_log import UsageLogger
 from .execution import ExecutionControl, ExecutionStopped
@@ -175,6 +176,8 @@ class ToolContext:
     decisions: dict[str, str] = field(default_factory=dict)
     resume_calls: list[Any] | None = None
     execution_control: ExecutionControl | None = None
+    thinking_mode: str = "medium"
+    active_thinking_level: str = "medium"
 
     # 直近ターンの記録（UI 表示用）
     turn_runs: list[QueryRun] = field(default_factory=list)
@@ -187,6 +190,8 @@ class ToolContext:
     # セッション全体の累計（サイドバー表示用）
     session_prompt_tokens: int = 0
     session_output_tokens: int = 0
+    session_thinking_tokens: int | None = 0
+    session_gemini_cost_usd: float | None = None
     session_total_tokens: int = 0
     session_billed_bytes: int = 0
 
@@ -204,6 +209,13 @@ class ToolContext:
     limit_baseline_session_prompt_tokens: int = 0
     limit_baseline_session_output_tokens: int = 0
     limit_baseline_session_billed_bytes: int = 0
+    limit_baseline_session_gemini_cost_usd: float = 0.0
+
+    def gemini_cost_usd(self) -> float:
+        # 旧履歴には費用の累計がない。旧モデルの単価で引き継ぐ。
+        if self.session_gemini_cost_usd is None:
+            return gemini_cost_usd(self.session_prompt_tokens, self.session_output_tokens)
+        return self.session_gemini_cost_usd
 
     def start_turn(self) -> None:
         self.turn_runs = []
@@ -348,8 +360,10 @@ def build_declarations() -> list[types.FunctionDeclaration]:
 
 
 class GeminiAgent:
-    def __init__(self, settings: Settings, client: genai.Client | None = None):
+    def __init__(self, settings: Settings, client: genai.Client | None = None,
+                 thinking_level: str | None = None):
         self.settings = settings
+        self.thinking_level = thinking_level
         self.client = client or genai.Client(
             vertexai=True,
             project=settings.gcp_project,
@@ -360,14 +374,18 @@ class GeminiAgent:
     # -- 生成 ---------------------------------------------------------
     def _config(self) -> types.GenerateContentConfig:
         kwargs: dict[str, Any] = {
-            "system_instruction": SYSTEM_INSTRUCTION,
+            "system_instruction": SYSTEM_INSTRUCTION + PROFILES.get(self.thinking_level, ""),
             "tools": [types.Tool(function_declarations=self.declarations)],
             "temperature": 0.1,
             "automatic_function_calling": types.AutomaticFunctionCallingConfig(
                 disable=True
             ),
         }
-        if self.settings.thinking_budget is not None:
+        if self.settings.gemini_model == "gemini-3.8-flash":
+            kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level=(self.thinking_level or "medium").upper(),
+            )
+        elif self.settings.thinking_budget is not None:
             kwargs["thinking_config"] = types.ThinkingConfig(
                 thinking_budget=self.settings.thinking_budget
             )
@@ -379,6 +397,43 @@ class GeminiAgent:
             contents=contents,
             config=self._config(),
         )
+
+    def _record_usage(self, ctx, response, model):
+        usage = response.usage_metadata
+        if usage is not None:
+            prompt_tokens = usage.prompt_token_count or 0
+            thinking_tokens = usage.thoughts_token_count or 0
+            # thinking トークンも出力と同じ単価で課金されるため出力側に含める
+            # （UI・コスト計算・月次制限はこの合算値のまま。ログにだけ
+            # thinking_tokens で内訳を別途残す）
+            output_tokens = (usage.candidates_token_count or 0) + thinking_tokens
+            total_tokens = usage.total_token_count or 0
+            call_cost = gemini_cost_usd(
+                prompt_tokens, output_tokens,
+                model,
+                getattr(self.settings, "vertex_location", "global"),
+            )
+            ctx.session_gemini_cost_usd = ctx.gemini_cost_usd() + call_cost
+            ctx.turn_prompt_tokens += prompt_tokens
+            ctx.turn_output_tokens += output_tokens
+            ctx.turn_thinking_tokens += thinking_tokens
+            ctx.turn_total_tokens += total_tokens
+            ctx.session_prompt_tokens += prompt_tokens
+            ctx.session_output_tokens += output_tokens
+            if ctx.session_thinking_tokens is not None:
+                ctx.session_thinking_tokens += thinking_tokens
+            ctx.session_total_tokens += total_tokens
+            if ctx.usage_logger is not None:
+                ctx.usage_logger.log_gemini_call(
+                    user_email=ctx.user_email,
+                    session_id=ctx.session_id,
+                    turn_id=ctx.turn_id,
+                    prompt_tokens=prompt_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=total_tokens,
+                    thinking_tokens=thinking_tokens,
+                    model=model,
+                )
 
     # -- ツール実行 ---------------------------------------------------
     def _call_tool(
@@ -609,6 +664,13 @@ class GeminiAgent:
 
         contents は破壊的に更新される（Gemini の応答とツール結果を追記）。
         """
+        if getattr(self.settings, "gemini_model", "") == "gemini-3.8-flash" and self.thinking_level is None:
+            if ctx.resume_calls is None:
+                ctx.active_thinking_level = "high" if ctx.thinking_mode == "high" else "medium"
+            # 共用のエージェントを変更せず、今回のターンにだけ設定を固定する。
+            turn_agent = GeminiAgent(self.settings, client=self.client,
+                                     thinking_level=ctx.active_thinking_level)
+            return turn_agent.run(contents, ctx, on_progress=on_progress)
         pending_calls = ctx.resume_calls
         ctx.resume_calls = None
         processed_tools = False
@@ -638,32 +700,7 @@ class GeminiAgent:
                             error_text=technical_detail(exc, limit=10_000),
                         )
                     raise
-                usage = response.usage_metadata
-                if usage is not None:
-                    prompt_tokens = usage.prompt_token_count or 0
-                    thinking_tokens = usage.thoughts_token_count or 0
-                    # thinking トークンも出力と同じ単価で課金されるため出力側に含める
-                    # （UI・コスト計算・週次制限はこの合算値のまま。ログにだけ
-                    # thinking_tokens で内訳を別途残す）
-                    output_tokens = (usage.candidates_token_count or 0) + thinking_tokens
-                    total_tokens = usage.total_token_count or 0
-                    ctx.turn_prompt_tokens += prompt_tokens
-                    ctx.turn_output_tokens += output_tokens
-                    ctx.turn_thinking_tokens += thinking_tokens
-                    ctx.turn_total_tokens += total_tokens
-                    ctx.session_prompt_tokens += prompt_tokens
-                    ctx.session_output_tokens += output_tokens
-                    ctx.session_total_tokens += total_tokens
-                    if ctx.usage_logger is not None:
-                        ctx.usage_logger.log_gemini_call(
-                            user_email=ctx.user_email,
-                            session_id=ctx.session_id,
-                            turn_id=ctx.turn_id,
-                            prompt_tokens=prompt_tokens,
-                            output_tokens=output_tokens,
-                            total_tokens=total_tokens,
-                            thinking_tokens=thinking_tokens,
-                        )
+                self._record_usage(ctx, response, getattr(self.settings, "gemini_model", "gemini-2.5-flash"))
                 if ctx.execution_control is not None:
                     ctx.execution_control.check()
                 candidate = (response.candidates or [None])[0]

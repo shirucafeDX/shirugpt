@@ -19,8 +19,6 @@ import streamlit as st
 from .config import (
     BQ_PRICE_PER_TIB_USD,
     DEFAULT_MONTHLY_LIMIT_USD,
-    GEMINI_INPUT_PRICE_PER_1M_USD,
-    GEMINI_OUTPUT_PRICE_PER_1M_USD,
     GEMINI_PRICE_AS_OF,
     Settings,
     bq_cost_usd,
@@ -47,6 +45,8 @@ def _load_usage(_logger: UsageLogger, start: date, end: date) -> pd.DataFrame:
 def _rollup(df: pd.DataFrame, unit: str) -> pd.DataFrame:
     """日別のログを表示単位ごとに集約し、金額列を足す。"""
     out = df.copy()
+    if "gemini_usd" not in out:
+        out["gemini_usd"] = [gemini_cost_usd(p, o) for p, o in zip(out.prompt_tokens, out.output_tokens)]
     out["event_date"] = pd.to_datetime(out["event_date"])
     if unit == "月別":
         out["期間"] = out["event_date"].dt.strftime("%Y-%m")
@@ -63,15 +63,16 @@ def _rollup(df: pd.DataFrame, unit: str) -> pd.DataFrame:
                 "gemini_calls",
                 "bq_queries",
                 "errors",
+                "gemini_usd",
             ]
         ]
         .sum()
         .sort_values(["期間", "user_email"], ascending=[False, True])
     )
     grouped["推定金額(USD)"] = [
-        gemini_cost_usd(p, o) + bq_cost_usd(b)
-        for p, o, b in zip(
-            grouped["prompt_tokens"], grouped["output_tokens"], grouped["billed_bytes"]
+        cost + bq_cost_usd(b)
+        for cost, b in zip(
+            grouped["gemini_usd"], grouped["billed_bytes"]
         )
     ]
     return grouped
@@ -132,6 +133,7 @@ def _render_settings_tab(settings: Settings) -> None:
     st.subheader("現在適用中の設定")
     st.caption("起動時に読み込んだ設定です。環境変数や Secrets の変更後はアプリを再起動してください。")
     thinking = (
+        "medium（/thinking highでhigh）" if settings.gemini_model == "gemini-3.8-flash" else
         "未指定（モデル既定）" if settings.thinking_budget is None else
         "動的（-1）" if settings.thinking_budget == -1 else
         "無効（0）" if settings.thinking_budget == 0 else
@@ -141,7 +143,7 @@ def _render_settings_tab(settings: Settings) -> None:
     rows = [
         ("モデル", settings.gemini_model),
         ("Gemini リージョン", settings.vertex_location),
-        ("思考トークン予算", thinking),
+        ("思考設定", thinking),
         ("出力トークン上限", "未指定（モデル既定）"),
         ("Gemini に渡すサンプル行数", f"{settings.sample_rows:,} 行"),
         ("調査ループ上限", f"{settings.max_tool_iterations:,} 回／処理"),
@@ -186,10 +188,8 @@ def _render_usage_tab(logger: UsageLogger) -> None:
 
     grouped = _rollup(df, unit)
 
-    total_prompt = int(grouped["prompt_tokens"].sum())
-    total_output = int(grouped["output_tokens"].sum())
     total_bytes = int(grouped["billed_bytes"].sum())
-    total_cost_usd = gemini_cost_usd(total_prompt, total_output) + bq_cost_usd(total_bytes)
+    total_cost_usd = float(grouped["推定金額(USD)"].sum())
     m1, m2, m3 = st.columns(3)
     m1.metric("合計トークン", f"{int(grouped['total_tokens'].sum()):,}")
     m2.metric("推定金額", f"${total_cost_usd:,.4f}")
@@ -199,9 +199,7 @@ def _render_usage_tab(logger: UsageLogger) -> None:
     st.dataframe(_display_frame(grouped), width="stretch", hide_index=True)
 
     st.caption(
-        f"推定金額は Gemini トークン（{GEMINI_PRICE_AS_OF} 時点のレート、"
-        rf"入力 \${GEMINI_INPUT_PRICE_PER_1M_USD}/100万トークン、"
-        rf"出力 \${GEMINI_OUTPUT_PRICE_PER_1M_USD}/100万トークン）と "
+        f"推定金額は Geminiのモデル別標準単価（{GEMINI_PRICE_AS_OF}時点、期間限定還元・キャッシュ割引前）と "
         rf"BigQuery クエリ（\${BQ_PRICE_PER_TIB_USD}/TiB）の合計金額です。"
         f"実際の請求金額は Google Cloud Console の[課金]ページをご覧ください。"
     )

@@ -41,7 +41,6 @@ from src.config import (
     Settings,
     bq_cost_usd,
     credentials_leak_warning,
-    gemini_cost_usd,
     human_bytes,
     load_settings,
 )
@@ -195,6 +194,8 @@ def init_state(
         st.session_state.ctx = _new_context(
             settings, tools, usage_logger, user_email
         )
+    if st.session_state.ctx.thinking_mode not in ("medium", "high"):
+        st.session_state.ctx.thinking_mode = "medium"
     return st.session_state.ctx
 
 
@@ -440,11 +441,10 @@ def _effective_monthly_usage_usd(
         ctx.limit_baseline_session_prompt_tokens = ctx.session_prompt_tokens
         ctx.limit_baseline_session_output_tokens = ctx.session_output_tokens
         ctx.limit_baseline_session_billed_bytes = ctx.session_billed_bytes
+        ctx.limit_baseline_session_gemini_cost_usd = ctx.gemini_cost_usd()
 
-    delta = gemini_cost_usd(
-        ctx.session_prompt_tokens - ctx.limit_baseline_session_prompt_tokens,
-        ctx.session_output_tokens - ctx.limit_baseline_session_output_tokens,
-    ) + bq_cost_usd(ctx.session_billed_bytes - ctx.limit_baseline_session_billed_bytes)
+    delta = (ctx.gemini_cost_usd() - ctx.limit_baseline_session_gemini_cost_usd
+             + bq_cost_usd(ctx.session_billed_bytes - ctx.limit_baseline_session_billed_bytes))
     return ctx.limit_baseline_usd + delta
 
 
@@ -858,6 +858,7 @@ def render_chat_page(
         st.error(f"⚠️ {leak}")
 
     ctx = init_state(settings, tools, usage_logger, user_email)
+    st.caption(f"{ctx.settings.gemini_model} · 思考：{ctx.thinking_mode}")
 
     monthly_used_usd = None
     if user_email and settings.logging_enabled:

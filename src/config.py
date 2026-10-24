@@ -167,8 +167,8 @@ def load_settings() -> Settings:
         default_dataset=default_dataset,
         allowed_datasets=allowed,
         credentials_path=_resolve_credentials(),
-        vertex_location=_str("VERTEX_LOCATION", "us-central1"),
-        gemini_model=_str("GEMINI_MODEL", "gemini-2.5-flash"),
+        vertex_location=_str("VERTEX_LOCATION", "global"),
+        gemini_model=_str("GEMINI_MODEL", "gemini-3.8-flash"),
         thinking_budget=_opt_int("GEMINI_THINKING_BUDGET"),
         dry_run_confirm_bytes=_int("DRY_RUN_CONFIRM_BYTES", 1024**3),
         max_bytes_billed=_int("MAX_BYTES_BILLED", 10 * 1024**3),
@@ -224,16 +224,34 @@ def credentials_leak_warning(settings: Settings) -> str | None:
 
 # Gemini のトークン単価（USD / 1M トークン）。レート改定時はここを更新する。
 # サイドバーと管理者ページの両方がこれを参照する（定数を二重に持たない）。
-GEMINI_PRICE_AS_OF = "2026-08-19"
+GEMINI_PRICE_AS_OF = "2026-10-24"
 GEMINI_INPUT_PRICE_PER_1M_USD = 0.30
 GEMINI_OUTPUT_PRICE_PER_1M_USD = 2.50
 
 
-def gemini_cost_usd(prompt_tokens: int, output_tokens: int) -> float:
-    """トークン数から概算金額（USD）を求める。output には thinking 分も含める。"""
+def gemini_cost_usd(prompt_tokens: int, output_tokens: int,
+                    model: str = "gemini-2.5-flash", location: str = "global") -> float:
+    """outputは思考を含む。3.8は期間限定還元・キャッシュ割引前の標準単価。"""
+    input_rate, output_rate = GEMINI_INPUT_PRICE_PER_1M_USD, GEMINI_OUTPUT_PRICE_PER_1M_USD
+    if model == "gemini-3.8-flash":
+        input_rate, output_rate = (1.5, 7.5) if location == "global" else (1.65, 8.25)
+    elif model == "gemini-3.1-flash-lite":
+        input_rate, output_rate = (0.25, 1.5) if location == "global" else (0.275, 1.65)
     return (
-        prompt_tokens / 1_000_000 * GEMINI_INPUT_PRICE_PER_1M_USD
-        + output_tokens / 1_000_000 * GEMINI_OUTPUT_PRICE_PER_1M_USD
+        prompt_tokens / 1_000_000 * input_rate
+        + output_tokens / 1_000_000 * output_rate
+    )
+
+
+def gemini_cost_sql(location: str) -> str:
+    """利用ログの各行をモデル別に換算する固定SQL式。NULLモデルは旧単価。"""
+    input_rate = gemini_cost_usd(1_000_000, 0, "gemini-3.8-flash", location)
+    output_rate = gemini_cost_usd(0, 1_000_000, "gemini-3.8-flash", location)
+    lite_input = gemini_cost_usd(1_000_000, 0, "gemini-3.1-flash-lite", location)
+    lite_output = gemini_cost_usd(0, 1_000_000, "gemini-3.1-flash-lite", location)
+    return (
+        f"(IFNULL(prompt_tokens, 0) * IF(model = 'gemini-3.8-flash', {input_rate}, IF(model = 'gemini-3.1-flash-lite', {lite_input}, 0.30))"
+        f" + IFNULL(output_tokens, 0) * IF(model = 'gemini-3.8-flash', {output_rate}, IF(model = 'gemini-3.1-flash-lite', {lite_output}, 2.50))) / 1000000.0"
     )
 
 

@@ -23,6 +23,8 @@ CONTEXT_FIELDS = (
     'turn_runs', 'turn_errors', 'turn_prompt_tokens', 'turn_output_tokens',
     'turn_thinking_tokens', 'turn_total_tokens', 'session_prompt_tokens',
     'session_output_tokens', 'session_total_tokens', 'session_billed_bytes',
+    'session_thinking_tokens',
+    'thinking_mode', 'active_thinking_level', 'session_gemini_cost_usd',
     'session_id', 'turn_id',
 )
 
@@ -83,8 +85,8 @@ def unpack(data, ctx):
         payload = json.loads(archive.read('conversation.json'))
         if payload['version'] != 1:
             raise ValueError('この履歴の保存形式には対応していません。')
-        if payload['policy'] != policy(ctx.settings):
-            raise ValueError('データのアクセス設定またはモデルが変更されています。この履歴は再開できません。')
+        if payload['policy'][:2] != policy(ctx.settings)[:2]:
+            raise ValueError('データのアクセス設定が変更されています。この履歴は再開できません。')
         frames = {}
 
         def decode(value):
@@ -112,9 +114,25 @@ def unpack(data, ctx):
 
         context = decode(payload['context'])
         for key in CONTEXT_FIELDS:
-            setattr(ctx, key, context[key])
+            if key in context:
+                setattr(ctx, key, context[key])
+        if 'session_thinking_tokens' not in context:
+            ctx.session_thinking_tokens = None
         messages, contents = decode(payload['messages']), decode(payload['contents'])
         pending = ConfirmationPending(**payload['pending']) if payload['pending'] else None
+        if payload['policy'][2] != ctx.settings.gemini_model:
+            # 別モデルの署名や未完のFunction Callingを送らず、質問と回答を引き継ぐ。
+            contents = [types.Content(role='user' if m['role'] == 'user' else 'model',
+                                      parts=[types.Part.from_text(text=m['text'])])
+                        for m in messages if m.get('text')]
+            if pending is not None:
+                messages.append({'role': 'assistant', 'text': 'モデルが変更されたため、以前の実行確認は解除しました。必要に応じて、もう一度質問してください。'})
+            pending = None
+            ctx.resume_calls = None
+        if ctx.thinking_mode not in ('medium', 'high'):
+            ctx.thinking_mode = 'medium'
+        if ctx.active_thinking_level not in ('medium', 'high'):
+            ctx.active_thinking_level = 'medium'
         if payload['status'] == 'running':
             text = '前回の処理は中断されました。必要に応じて、もう一度質問してください。'
             messages.append({'role': 'assistant', 'text': text, 'is_error': True})

@@ -21,7 +21,7 @@ import pandas as pd
 from google.api_core import exceptions as gexc
 from google.cloud import bigquery
 
-from .config import Settings, bq_cost_usd, gemini_cost_usd
+from .config import Settings, bq_cost_usd, gemini_cost_usd, gemini_cost_sql
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +118,11 @@ class MonthlyUsage:
     prompt_tokens: int
     output_tokens: int
     billed_bytes: int
+    gemini_usd: float | None = None
 
     def cost_usd(self) -> float:
-        return gemini_cost_usd(self.prompt_tokens, self.output_tokens) + bq_cost_usd(
+        return (self.gemini_usd if self.gemini_usd is not None else
+                gemini_cost_usd(self.prompt_tokens, self.output_tokens)) + bq_cost_usd(
             self.billed_bytes
         )
 
@@ -299,6 +301,7 @@ class UsageLogger:
         output_tokens: int,
         total_tokens: int,
         thinking_tokens: int = 0,
+        model: str | None = None,
     ) -> None:
         self._insert(
             {
@@ -307,7 +310,7 @@ class UsageLogger:
                 "user_email": user_email or UNKNOWN_USER,
                 "session_id": session_id,
                 "turn_id": turn_id,
-                "model": self.settings.gemini_model,
+                "model": model or self.settings.gemini_model,
                 "prompt_tokens": int(prompt_tokens),
                 "output_tokens": int(output_tokens),
                 "thinking_tokens": int(thinking_tokens),
@@ -390,6 +393,7 @@ class UsageLogger:
                     "gemini_calls",
                     "bq_queries",
                     "errors",
+                    "gemini_usd",
                 ]
             )
 
@@ -400,6 +404,7 @@ class UsageLogger:
               SUM(IFNULL(prompt_tokens, 0)) AS prompt_tokens,
               SUM(IFNULL(output_tokens, 0)) AS output_tokens,
               SUM(IFNULL(total_tokens, 0))  AS total_tokens,
+              SUM(IF(event_type = '{EVENT_GEMINI_CALL}', {gemini_cost_sql(self.settings.vertex_location)}, 0)) AS gemini_usd,
               SUM(IFNULL(billed_bytes, 0))  AS billed_bytes,
               COUNTIF(event_type = '{EVENT_GEMINI_CALL}') AS gemini_calls,
               COUNTIF(event_type = '{EVENT_BQ_QUERY}')    AS bq_queries,
@@ -442,7 +447,8 @@ class UsageLogger:
               SUM(IF(event_type = '{EVENT_GEMINI_CALL}', IFNULL(output_tokens, 0), 0))
                 AS output_tokens,
               SUM(IF(event_type = '{EVENT_BQ_QUERY}', IFNULL(billed_bytes, 0), 0))
-                AS billed_bytes
+                AS billed_bytes,
+              SUM(IF(event_type = '{EVENT_GEMINI_CALL}', {gemini_cost_sql(self.settings.vertex_location)}, 0)) AS gemini_usd
             FROM `{self.table_id}`
             WHERE user_email = @user_email
               AND event_time >= @start
@@ -467,6 +473,7 @@ class UsageLogger:
             prompt_tokens=int(row.prompt_tokens or 0),
             output_tokens=int(row.output_tokens or 0),
             billed_bytes=int(row.billed_bytes or 0),
+            gemini_usd=float(row.gemini_usd or 0),
         )
 
     def get_limits(self) -> pd.DataFrame:
