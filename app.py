@@ -757,6 +757,7 @@ def submit_prompt(
     # コマンドはUI側の専用経路だけで扱う。直接呼び出されてもモデルへ送らない。
     if parse_command(prompt) is not None:
         raise ValueError("コマンドは質問として送信できません。")
+    st.session_state.pop("command_output", None)
     message = {"role": "user", "text": prompt}
     if question is not None:
         message["question"] = question
@@ -1064,7 +1065,6 @@ def render_chat_page(
     if pending is not None or blocked or awaiting_clarification:
         st.warning("現在はコマンドのみ利用できます。確認待ちの場合は、上のフォームから回答してください。")
         return
-    st.session_state.pop("command_output", None)
     submit_prompt(prompt, agent, ctx)
 
 

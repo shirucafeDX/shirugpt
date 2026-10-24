@@ -59,3 +59,39 @@ st.session_state['called_tools'] = bool(ctx.tools.mock_calls)
             submit_prompt('/new', agent, ctx)
         agent.run.assert_not_called()
         ctx.usage_logger.log_prompt.assert_not_called()
+
+
+class CommandOutputDismissTests(unittest.TestCase):
+    def test_enter_callback_closes_output_without_touching_conversation(self):
+        app = AppTest.from_string('''
+import streamlit as st
+from src.command_menu import _keyboard_event
+st.session_state.command_output = 'モデルの説明'
+st.session_state.messages = [{'role': 'user', 'text': '前の質問'}]
+st.session_state.contents = ['会話の文脈']
+st.session_state['slash_command_menu'] = {'action': {'kind': 'close_command_output'}}
+_keyboard_event()
+''').run(timeout=20)
+        self.assertFalse(app.exception)
+        self.assertNotIn('command_output', app.session_state)
+        self.assertEqual(app.session_state.contents, ['会話の文脈'])
+        self.assertEqual(len(app.session_state.messages), 1)
+
+    def test_question_submission_closes_output_before_analysis_starts(self):
+        app = AppTest.from_string('''
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+import streamlit as st
+from app import submit_prompt
+from src.agent import ToolContext
+ctx = ToolContext(tools=Mock(), settings=SimpleNamespace(chat_history_bucket=''))
+st.session_state.command_output = '使用量の説明'
+st.session_state.messages = []
+st.session_state.contents = []
+with patch('app.BackgroundTurn') as turn, patch('app.st.rerun'):
+    submit_prompt('来店数は？', Mock(), ctx)
+    turn.return_value.start.assert_called_once()
+''').run(timeout=20)
+        self.assertFalse(app.exception)
+        self.assertNotIn('command_output', app.session_state)
+        self.assertEqual(app.session_state.messages[0]['text'], '来店数は？')

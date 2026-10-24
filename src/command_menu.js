@@ -173,6 +173,18 @@ export default function ({ data, parentElement, setTriggerValue }) {
         return;
       }
     }
+    // 空のチャット入力や画面上のEnterは、説明パネルを閉じる操作にする。
+    // 入力済みの質問、自由記述の改行、候補の確定は通常の処理へ渡す。
+    if (data?.command_output_open && menu.hidden && event.key === "Enter"
+        && !event.isComposing && event.keyCode !== 229
+        && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
+        && ((event.target === input && !input.value.trim())
+            || (!editing && !event.target.closest?.("button")))) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setTriggerValue("action", {kind: "close_command_output"});
+      return;
+    }
     if ((event.target !== input && !menu.contains(event.target)) || menu.hidden || event.isComposing || event.keyCode === 229) return;
     if (!["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) return;
     if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
