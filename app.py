@@ -329,8 +329,8 @@ def render_history(settings, tools, usage_logger, user_email, ctx) -> None:
 }
 </style>
 """, unsafe_allow_html=True)
-    with st.container(key="history_list"):
-        for entry in entries:
+    def render_entries(items):
+        for entry in items:
             selected = entry["id"]
             active = selected == st.session_state.history_id
             row_key = f"history_row_{'active_' if active else ''}{selected}"
@@ -359,6 +359,12 @@ def render_history(settings, tools, usage_logger, user_email, ctx) -> None:
                             st.error("削除できませんでした。アプリを開き直して再試行してください。")
                 if clicked:
                     open_conversation(settings, tools, usage_logger, user_email, store, selected)
+
+    with st.container(key="history_list"):
+        render_entries(entries[:5])
+        if len(entries) > 5:
+            with st.expander(f"以前の履歴（{len(entries) - 5}件）"):
+                render_entries(entries[5:])
 
 
 def open_conversation(settings, tools, usage_logger, user_email, store, selected) -> None:
@@ -588,18 +594,6 @@ def render_sidebar(
                 st.caption("毎月1日 0:00（JST）にリセットされます。")
             # st.caption("上限の引き上げは店長提案の承認後、DXにお問い合わせください。")
 
-        st.divider()
-        st.subheader("セッション使用量")
-        st.markdown(
-            f"""
-- モデル: `{settings.gemini_model}`
-- 入力トークン合計: **{ctx.session_prompt_tokens:,}**
-- 出力トークン合計: **{ctx.session_output_tokens:,}**
-- 実行クエリ量合計: **{human_bytes(ctx.session_billed_bytes)}**
-"""
-        )
-        st.caption("この会話の累計です。履歴から再開した場合は以前の利用量を含みます。")
-        
         st.divider()
         if st.button("新しいチャット", width="stretch", disabled=st.session_state.history_dirty):
             reset_conversation(settings, tools, usage_logger, user_email)
