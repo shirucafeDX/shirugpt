@@ -296,31 +296,68 @@ def render_history(settings, tools, usage_logger, user_email, ctx) -> None:
     if not entries:
         st.caption("保存された会話はありません。")
         return
-    by_id = {e["id"]: e for e in entries}
     dirty = st.session_state.history_dirty
-    for entry in entries:
-        selected = entry["id"]
-        title = conversation_title([{"role": "user", "text": entry["title"]}])
-        clicked = st.button(
-            title, key=f"open_history_{selected}", width="stretch", disabled=dirty,
-            type="primary" if selected == st.session_state.history_id else "secondary",
-            help=entry["updated"].astimezone(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M"),
-        )
-        if clicked:
-            open_conversation(settings, tools, usage_logger, user_email, store, selected)
-    selected = st.session_state.history_id
-    if selected not in by_id:
-        return
-    confirm_delete = st.checkbox("この会話を削除する", key=f"delete_history_{selected}")
-    if st.button("履歴から削除", disabled=not confirm_delete or dirty):
-        try:
-            store.delete(user_email, selected, by_id[selected]["generation"])
-            st.session_state.history_entries = [e for e in entries if e["id"] != selected]
-            reset_conversation(settings, tools, usage_logger, user_email)
-            st.rerun()
-        except Exception:
-            logger.warning("履歴の削除に失敗しました。", exc_info=True)
-            st.error("削除できませんでした。アプリを開き直して再試行してください。")
+    # 履歴内だけを装飾する。標準ウィジェットのキーボード操作は維持する。
+    st.markdown("""
+<style>
+.st-key-history_list [class*="st-key-history_row_"] {
+    padding: .35rem .55rem; border-radius: .5rem;
+}
+.st-key-history_list [class*="st-key-history_row_active_"] {
+    background: color-mix(in srgb, currentColor 8%, transparent);
+}
+.st-key-history_list [class*="st-key-history_row_"]:not([class*="history_row_active_"]):hover {
+    background: color-mix(in srgb, currentColor 5%, transparent);
+}
+.st-key-history_list [class*="st-key-open_history_"] button {
+    border: none; background: transparent; box-shadow: none;
+    justify-content: flex-start; text-align: left; padding: 0;
+    min-height: 1.6rem; color: inherit;
+}
+.st-key-history_list [class*="st-key-open_history_"] button:focus-visible {
+    outline: 2px solid currentColor; outline-offset: 3px;
+}
+.st-key-history_list [class*="st-key-open_history_"] button > div {
+    justify-content: flex-start;
+}
+.st-key-history_list [data-testid="stVerticalBlock"] { gap: .15rem; }
+.st-key-history_list [data-testid="stCaptionContainer"] { font-size: .75rem; }
+.st-key-history_list [data-testid="stPopover"] button {
+    border: none; background: transparent; padding: 0 .3rem;
+    min-height: 1.6rem; box-shadow: none;
+}
+</style>
+""", unsafe_allow_html=True)
+    with st.container(key="history_list"):
+        for entry in entries:
+            selected = entry["id"]
+            active = selected == st.session_state.history_id
+            row_key = f"history_row_{'active_' if active else ''}{selected}"
+            title = conversation_title([{"role": "user", "text": entry["title"]}])
+            with st.container(key=row_key):
+                text_column, menu_column = st.columns([9, 1])
+                with text_column:
+                    clicked = st.button(
+                        title, key=f"open_history_{selected}", width="stretch", disabled=dirty,
+                        help="表示中の会話" if active else "会話を開く",
+                    )
+                    st.caption(entry["updated"].astimezone(ZoneInfo("Asia/Tokyo")).strftime("%Y/%m/%d %H:%M"))
+                if active:
+                    with menu_column:
+                        with st.popover("⋯", help="会話の操作", disabled=dirty):
+                            confirm_delete = st.checkbox("この会話を削除する", key=f"delete_history_{selected}")
+                            delete = st.button("履歴から削除", disabled=not confirm_delete or dirty)
+                    if delete:
+                        try:
+                            store.delete(user_email, selected, entry["generation"])
+                            st.session_state.history_entries = [e for e in entries if e["id"] != selected]
+                            reset_conversation(settings, tools, usage_logger, user_email)
+                            st.rerun()
+                        except Exception:
+                            logger.warning("履歴の削除に失敗しました。", exc_info=True)
+                            st.error("削除できませんでした。アプリを開き直して再試行してください。")
+                if clicked:
+                    open_conversation(settings, tools, usage_logger, user_email, store, selected)
 
 
 def open_conversation(settings, tools, usage_logger, user_email, store, selected) -> None:
