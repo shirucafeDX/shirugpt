@@ -248,7 +248,6 @@ def history_cache(settings, user_email):
     return cache
 
 
-
 def save_conversation(ctx: ToolContext, status: str = "ready") -> None:
     if not ctx.user_email or not ctx.settings.chat_history_bucket:
         return
@@ -1003,8 +1002,6 @@ def render_chat_page(
         st.error(f"⚠️ {leak}")
 
     ctx = init_state(settings, tools, usage_logger, user_email)
-    st.caption(f"{ctx.settings.gemini_model} · effort：{ctx.thinking_mode.title()}"
-               + (" · 詳細分析モード" if ctx.thinking_enabled else ""))
 
     monthly_used_usd = None
     if user_email and settings.logging_enabled:
@@ -1053,10 +1050,6 @@ def render_chat_page(
 
     prompt = render_prompt_input(ctx)
     if not prompt:
-        if not st.session_state.messages and pending is None and not blocked:
-            st.info(
-                "プロトタイプ版です。AIは必ずしも正しい回答を返すとは限りません。"
-            )
         return
 
     if handle_command(prompt, ctx, settings, tools, usage_logger, user_email,
