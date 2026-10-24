@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .config import bq_cost_usd, gemini_cost_usd, human_bytes
+from .config import BQ_PRICE_PER_TIB_USD, GEMINI_PRICE_AS_OF, bq_cost_usd, gemini_cost_usd, human_bytes
 
 
 HELP = """\
@@ -12,7 +12,7 @@ HELP = """\
 | `/help` | コマンドの一覧 |
 | `/model` | 使用中のモデルを表示 |
 | `/new` | 新しいチャットを開始 |
-| `/usage` | 月次利用額・残額と、この会話のトークン数・クエリ量 |
+| `/usage` | 当月のInput・Output（思考を含む）、クエリ量、費用と残額 |
 | `/thinking` | 思考設定を表示 |
 | `/thinking high` | highを明示指定（解除するまで継続） |
 | `/thinking medium` | 通常設定へ戻す（既定） |
@@ -42,22 +42,52 @@ def usage_text(ctx, monthly_used: float | None, monthly_limit: float | None, res
     else:
         ratio = monthly_used / monthly_limit * 100 if monthly_limit > 0 else 100.0
         monthly = (
-            f"今月の推定利用額：**${monthly_used:,.4f} / ${monthly_limit:,.2f}**（{ratio:.1f}%）  \n"
-            f"残額：**${max(0, monthly_limit - monthly_used):,.4f}**  \n"
+            f"今月の推定利用額：**USD {monthly_used:,.4f} / USD {monthly_limit:,.2f}**（{ratio:.1f}%）  \n"
+            f"残額：**USD {max(0, monthly_limit - monthly_used):,.4f}**  \n"
             f"次回リセット：{reset_at:%Y年%m月%d日 %H:%M}（日本時間）"
         )
-    thinking = getattr(ctx, "session_thinking_tokens", None)
-    # 古い履歴には思考トークンの累計がないため、最後のターンだけで代用しない。
-    thinking_label = f"{thinking:,}" if thinking is not None else "不明（古い履歴）"
     cost = (ctx.gemini_cost_usd() if hasattr(ctx, "gemini_cost_usd") else
             gemini_cost_usd(ctx.session_prompt_tokens, ctx.session_output_tokens)) + bq_cost_usd(ctx.session_billed_bytes)
+    settings = getattr(ctx, "settings", None)
+    model = getattr(settings, "gemini_model", "gemini-3.8-flash")
+    location = getattr(settings, "vertex_location", "global")
+    input_rate = gemini_cost_usd(1_000_000, 0, model, location)
+    output_rate = gemini_cost_usd(0, 1_000_000, model, location)
+    bq_cost = bq_cost_usd(ctx.session_billed_bytes)
+    ai_cost = cost - bq_cost
     return (
         f"{monthly}\n\nこの会話の累計\n\n"
         f"| 項目 | 値 |\n| --- | ---: |\n"
         f"| 入力トークン | {ctx.session_prompt_tokens:,} |\n"
         f"| 出力トークン（思考を含む） | {ctx.session_output_tokens:,} |\n"
-        f"| 思考トークン（出力の内数） | {thinking_label} |\n"
         f"| BigQuery課金対象量 | {human_bytes(ctx.session_billed_bytes)} |\n"
-        f"| 推定利用額 | ${cost:,.4f} |\n\n"
-        "金額は概算です。月次利用額は他の会話も含みます。同時利用分の反映には遅れが生じる場合があります。"
+        f"| Gemini推定費用 | USD {ai_cost:,.4f} |\n"
+        f"| BigQuery推定費用 | USD {bq_cost:,.4f} |\n"
+        f"| 推定利用額 | USD {cost:,.4f} |\n\n"
+        f"適用レート（{model} / {location}、{GEMINI_PRICE_AS_OF}時点）：入力 USD {input_rate:.2f} / 100万トークン、"
+        f"出力（思考を含む）USD {output_rate:.2f} / 100万トークン、BigQuery USD {BQ_PRICE_PER_TIB_USD:.2f} / TiB。\n\n"
+        "金額は期間限定還元・キャッシュ割引・無料枠の適用前の概算です。月次利用額は他の会話も含みます。同時利用分の反映には遅れが生じる場合があります。"
     )
+
+
+def current_month_usage_text(frame) -> str:
+    if frame.empty:
+        return "\n\n当月の利用ログはまだありません。"
+    row = next(frame.itertuples(index=False))
+    bq_usd = bq_cost_usd(row.billed_bytes)
+    lines = [
+        f"\n\n当月の詳細（{str(row.month)[:7]}・日本時間、金額はUSD）",
+        "",
+        "| 項目 | 使用量 |",
+        "| --- | ---: |",
+        f"| Inputトークン | {int(row.input_tokens):,} |",
+        f"| Outputトークン（思考を含む） | {int(row.output_tokens):,} |",
+        f"| AI呼び出し回数 | {int(row.gemini_calls):,} |",
+        f"| クエリ回数 | {int(row.bq_queries):,} |",
+        f"| クエリ課金対象量 | {human_bytes(row.billed_bytes)} |",
+        f"| Gemini費用 | USD {row.gemini_usd:,.4f} |",
+        f"| BigQuery費用 | USD {bq_usd:,.4f} |",
+        f"| 合計費用 | USD {row.gemini_usd + bq_usd:,.4f} |",
+        "\n出力トークンには思考分を含みます。詳細は取得時点のログに基づくため、上部の今月の利用額と差が出る場合があります。",
+    ]
+    return "\n".join(lines)

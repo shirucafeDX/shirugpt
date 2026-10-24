@@ -34,7 +34,7 @@ from src.bq_tools import (
 )
 from src.charts import KIND_LABELS, ChartSpec, suggest_chart
 from src.execution import BackgroundTurn, ExecutionStopped
-from src.commands import HELP, parse_command, usage_text
+from src.commands import HELP, parse_command, usage_text, current_month_usage_text
 from src.presentation import choose_presentation
 from src.config import (
     DEFAULT_MONTHLY_LIMIT_USD,
@@ -860,6 +860,14 @@ def handle_command(prompt, ctx, settings, tools, usage_logger, user_email,
             ctx, monthly_used_usd, monthly_limit_usd if user_email else None,
             end_utc.astimezone(ZoneInfo("Asia/Tokyo")),
         )
+        if user_email and getattr(settings, "logging_enabled", False):
+            try:
+                output += current_month_usage_text(usage_logger.current_month_details(user_email))
+            except Exception as exc:
+                logger.warning("当月使用量の取得に失敗しました。", exc_info=True)
+                output += "\n\n当月の詳細を取得できませんでした。時間をおいて `/usage` を実行してください。"
+                usage_logger.log_error(user_email=user_email, session_id=ctx.session_id, turn_id=ctx.turn_id,
+                                       error_source="usage_report_error", error_text=technical_detail(exc, limit=10_000))
     elif command.name == "/new" and not command.argument:
         if st.session_state.get("history_dirty"):
             save_conversation(ctx, st.session_state.get("history_status", "ready"))

@@ -223,18 +223,20 @@ def credentials_leak_warning(settings: Settings) -> str | None:
 
 
 # Gemini のトークン単価（USD / 1M トークン）。レート改定時はここを更新する。
-# サイドバーと管理者ページの両方がこれを参照する（定数を二重に持たない）。
+# 現行の定数はGemini 3.8 Flash / global。旧履歴は旧モデルの単価で計算する。
 GEMINI_PRICE_AS_OF = "2026-10-24"
-GEMINI_INPUT_PRICE_PER_1M_USD = 0.30
-GEMINI_OUTPUT_PRICE_PER_1M_USD = 2.50
+GEMINI_INPUT_PRICE_PER_1M_USD = 1.50
+GEMINI_OUTPUT_PRICE_PER_1M_USD = 7.50
+LEGACY_GEMINI_INPUT_PRICE_PER_1M_USD = 0.30
+LEGACY_GEMINI_OUTPUT_PRICE_PER_1M_USD = 2.50
 
 
 def gemini_cost_usd(prompt_tokens: int, output_tokens: int,
                     model: str = "gemini-2.5-flash", location: str = "global") -> float:
     """outputは思考を含む。3.8は期間限定還元・キャッシュ割引前の標準単価。"""
-    input_rate, output_rate = GEMINI_INPUT_PRICE_PER_1M_USD, GEMINI_OUTPUT_PRICE_PER_1M_USD
+    input_rate, output_rate = LEGACY_GEMINI_INPUT_PRICE_PER_1M_USD, LEGACY_GEMINI_OUTPUT_PRICE_PER_1M_USD
     if model == "gemini-3.8-flash":
-        input_rate, output_rate = (1.5, 7.5) if location == "global" else (1.65, 8.25)
+        input_rate, output_rate = (GEMINI_INPUT_PRICE_PER_1M_USD, GEMINI_OUTPUT_PRICE_PER_1M_USD) if location == "global" else (1.65, 8.25)
     elif model == "gemini-3.1-flash-lite":
         input_rate, output_rate = (0.25, 1.5) if location == "global" else (0.275, 1.65)
     return (

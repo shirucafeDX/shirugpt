@@ -19,10 +19,11 @@ class CommandTests(unittest.TestCase):
         ctx = SimpleNamespace(session_prompt_tokens=1000, session_output_tokens=2000,
                               session_thinking_tokens=1500, session_billed_bytes=1024**3)
         text = usage_text(ctx, 2, 5, datetime(2026, 11, 1, tzinfo=ZoneInfo("Asia/Tokyo")))
-        for expected in ("40.0%", "$3.0000", "2026年11月01日 00:00", "1,500", "1.00 GB"):
+        for expected in ("40.0%", "USD 3.0000", "2026年11月01日 00:00", "2,000", "USD 1.50", "USD 7.50", "BigQuery推定費用", "1.00 GB"):
             self.assertIn(expected, text)
         ctx.session_thinking_tokens = None
-        self.assertIn("不明（古い履歴）", usage_text(ctx, None, None, None))
+        self.assertNotIn("思考トークン（出力の内数）", usage_text(ctx, None, None, None))
+        self.assertNotIn("$", text)
 
     def test_local_commands_do_not_append_messages_call_model_or_record_prompts(self):
         for command in ("/help", "/usage", "/unknown", "/help extra", "/model", "/thinking"):

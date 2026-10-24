@@ -428,6 +428,50 @@ class UsageLogger:
         )
         return job.result().to_dataframe(create_bqstorage_client=False)
 
+    def current_month_details(self, user_email: str, now_utc: datetime | None = None) -> pd.DataFrame:
+        """本人の当月分をJSTで集計する。Outputは思考を含む。"""
+        columns = ["month", "input_tokens", "output_tokens",
+                   "gemini_calls", "bq_queries", "billed_bytes", "gemini_usd"]
+        if not self.settings.logging_enabled or not user_email.strip():
+            return pd.DataFrame(columns=columns)
+        current_start, next_start = jst_month_bounds_utc(now_utc)
+        start_date = current_start.astimezone(_JST).date()
+        end_date = next_start.astimezone(_JST).date()
+        sql = f"""
+            SELECT
+              DATE_TRUNC(DATE(event_time, 'Asia/Tokyo'), MONTH) AS month,
+              SUM(IF(event_type = '{EVENT_GEMINI_CALL}', IFNULL(prompt_tokens, 0), 0)) AS input_tokens,
+              SUM(IF(event_type = '{EVENT_GEMINI_CALL}',
+                IFNULL(output_tokens, 0), 0)) AS output_tokens,
+              COUNTIF(event_type = '{EVENT_GEMINI_CALL}') AS gemini_calls,
+              COUNTIF(event_type = '{EVENT_BQ_QUERY}') AS bq_queries,
+              SUM(IF(event_type = '{EVENT_BQ_QUERY}', IFNULL(billed_bytes, 0), 0)) AS billed_bytes,
+              SUM(IF(event_type = '{EVENT_GEMINI_CALL}', {gemini_cost_sql(self.settings.vertex_location)}, 0)) AS gemini_usd
+            FROM `{self.table_id}`
+            WHERE user_email = @user_email
+              AND event_time >= TIMESTAMP(@start_date, 'Asia/Tokyo')
+              AND event_time < TIMESTAMP(@end_date, 'Asia/Tokyo')
+            GROUP BY month
+            ORDER BY month DESC
+        """
+        config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("user_email", "STRING", user_email),
+                bigquery.ScalarQueryParameter("start_date", "DATE", start_date),
+                bigquery.ScalarQueryParameter("end_date", "DATE", end_date),
+            ], maximum_bytes_billed=self.settings.max_bytes_billed, use_query_cache=True,
+        )
+        frame = self._get_client().query(sql, job_config=config, location=self.settings.bq_location).result().to_dataframe(create_bqstorage_client=False)
+        calendar = pd.DataFrame({"month": [start_date]})
+        if frame.empty:
+            report = calendar.assign(**{column: 0 for column in columns if column != "month"})
+        else:
+            frame = frame.copy()
+            frame["month"] = pd.to_datetime(frame["month"]).dt.date
+            report = calendar.merge(frame, on="month", how="left").fillna(0)
+        report["gemini_usd"] = pd.to_numeric(report["gemini_usd"]).astype(float)
+        return report[columns].sort_values("month", ascending=False).reset_index(drop=True)
+
     def monthly_usage(
         self, user_email: str, start_utc: datetime, end_utc: datetime
     ) -> MonthlyUsage:
