@@ -53,6 +53,16 @@ class ClarificationTests(unittest.TestCase):
         self.call.args['selection_mode'] = 'invalid'
         self.assertIn('error', self.agent._dispatch(self.call, self.ctx).function_response.response)
 
+    def test_general_discussion_can_clarify_goals_without_querying_data(self):
+        self.ctx.schema_cache.clear()
+        self.call.args.update(scope='general', question='まず検討したい観点はどれですか？',
+                              options=['課題を整理する', '施策を考える'])
+        self.agent._generate = Mock(return_value=reply(self.call))
+        result = self.agent.run(self.contents, self.ctx)
+        self.assertIsInstance(result, ClarificationResult)
+        self.ctx.tools.get_table_schema.assert_not_called()
+        self.ctx.tools.run_query.assert_not_called()
+
     def test_waits_for_answer_without_executing_other_calls_and_can_resume(self):
         generated = reply(types.FunctionCall(name='run_query', args={'sql': 'SELECT 1'}), self.call)
         generated.candidates[0].content.parts[0].thought_signature = b'signature'

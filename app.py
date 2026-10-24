@@ -903,7 +903,7 @@ def render_chat_page(
     user_email: str,
 ) -> None:
     st.title("📊 ShiruGPT")
-    st.caption("SHIRUCAFEデータの可視化・分析AI")
+    st.caption("SHIRUCAFEデータの分析・課題発見の相談AI")
 
     leak = credentials_leak_warning(settings)
     if leak:

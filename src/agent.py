@@ -39,10 +39,21 @@ from .execution import ExecutionControl, ExecutionStopped
 logger = logging.getLogger(__name__)
 
 SYSTEM_INSTRUCTION = """あなたは BigQuery のデータ分析アシスタントです。
-ユーザーの質問に対し、提供されたツールを使って BigQuery を調べ、日本語で回答します。
+ユーザーの質問に対し、必要に応じてツールで BigQuery を調べ、日本語で回答します。
+データ分析に加え、一般知識を組み合わせた課題発見・施策検討・壁打ちも支援します。
+
+## データ分析と壁打ち
+- 店舗の実績・顧客属性・数値など、手元データの事実が必要な質問にはツールで確認する。
+- 一般的な考え方、アイデア出し、仮説整理だけで答えられる質問では、BigQueryを無理に使わない。
+  まず現時点の情報で論点や選択肢を提示し、実データで検証すべき点を示す。
+- 「データで確認できた事実」「一般知識に基づく仮説・提案」「未確認の点」を区別する。
+  一般的な知識を、当該店舗や利用者について確認できた事実のように説明しない。
+- 課題発見では目的に対するギャップ、別の解釈、優先順位、次の検証・小さな実験を提案する。
+  ユーザーの仮説にも別の可能性を示し、根拠なく同意したり因果関係を断定したりしない。
+- 外部検索は提供されていない。最新情報や外部調査を確認したように述べず、必要な確認先を示す。
 
 ## 進め方
-0. 確認質問の前に、質問に関連するテーブルと列・型・説明をツールで確認し、
+0. 実データの分析について確認質問をする前に、関連するテーブルと列・型・説明をツールで確認し、
    どのデータで何を分析できるかを把握する。確認済みの関連スキーマは再利用してよい。
    店舗名・商品名などの値も、必要なら少量の集計や DISTINCT で実在を確認する。
    売上・顧客単価など、必要な列が確認できていない指標を選択肢に含めない。
@@ -59,6 +70,9 @@ SYSTEM_INSTRUCTION = """あなたは BigQuery のデータ分析アシスタン�
    自由記述欄は画面が付けるため、選択肢に「その他」「自由記述」を含めない。
    確認が不要な明確な質問には、そのまま回答する。既に回答された条件を再確認しない。
    確認したデータで分析できる選択肢だけを提示する。
+   ask_clarificationのscopeは、実データの分析条件ならdata（既定）にする。
+   一般的な壁打ちの目的・検討したい観点など、データに依存しない確認だけはgeneralにでき、
+   この場合はスキーマを確認する必要はない。データの有無・指標の確認にはgeneralを使わない。
    ask_clarification は単独で呼び、ユーザーの回答を待ってから分析を続ける。
 1. どのテーブルを見るか不明なときは list_datasets → list_tables でテーブル名を確認する。
 2. 使いそうなテーブルにだけ get_table_schema を呼び、列名と型を確認する。
@@ -129,7 +143,8 @@ run_query が error を返したら、内容を読んで SQL を修正し、最�
   推移・分布・比較の回答用クエリは、必要な系列を1つの結果にまとめる。
 - run_query の purpose には「店舗別の来店数を集計」のように、何を確認するかを
   短い日本語で必ず指定する。実行中の進捗と実行詳細に表示される。
-- 日本語で、データにない内容を推測で補わない。
+- 日本語で回答する。店舗データの欠落を架空の数値や出来事で補わない。
+  一般知識を使う場合は仮説・提案として位置づけ、確認済みの事実と区別する。
 - 質問の種類によって長さを変える。
   - 件数・合計・単純な集計結果など「事実を聞かれただけ」の質問には、
     数値と単位を添えて簡潔に答える。前置きや余計な解説は付けない。
@@ -261,13 +276,18 @@ def build_declarations() -> list[types.FunctionDeclaration]:
             name="ask_clarification",
             description=(
                 "分析に必要な条件・観点をユーザーに確認し、選択式フォームで回答を待つ。"
-                "先に関連するテーブルのスキーマと必要な値を確認し、実データに基づく質問・選択肢を作る。"
+                "実データの分析条件（scope=data）では先にスキーマと必要な値を確認する。"
+                "一般的な壁打ちの目的・観点の確認（scope=general）ではデータ照会は不要。"
                 "確認質問は必ずこのツールで提示し、通常の回答本文に質問・選択肢を書くだけで終了しない。"
                 "単独で呼ぶ。自由記述欄は画面側が付けるため、その他・自由記述を選択肢に含めない。"
             ),
             parameters=types.Schema(
                 type=types.Type.OBJECT,
                 properties={
+                    "scope": types.Schema(
+                        type=types.Type.STRING, enum=["data", "general"],
+                        description="data:実データの分析条件（既定）。general:データに依存しない一般相談の目的・観点。",
+                    ),
                     "question": types.Schema(type=types.Type.STRING, description="確認したい1項目の具体的な質問（日本語）"),
                     "options": types.Schema(
                         type=types.Type.ARRAY,
@@ -440,7 +460,10 @@ class GeminiAgent:
         self, name: str, args: dict[str, Any], ctx: ToolContext
     ) -> dict[str, Any]:
         if name == "ask_clarification":
-            if not ctx.schema_cache:
+            scope = args.get("scope", "data")
+            if scope not in ("data", "general"):
+                raise BQToolError("scope は data または general を指定してください。")
+            if scope == "data" and not ctx.schema_cache:
                 raise BQToolError(
                     "確認質問の前に、関連するテーブルの get_table_schema を呼んでください。"
                     "取得できるデータを把握し、分析できる選択肢だけを提示してください。"
