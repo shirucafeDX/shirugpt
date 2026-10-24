@@ -88,6 +88,29 @@ class ThinkingTests(unittest.TestCase):
         self.assertEqual(restored.thinking_mode, 'medium')
         self.assertEqual(restored.active_thinking_level, 'medium')
 
+    def test_thinking_commands_change_only_local_mode_and_reject_invalid_arguments(self):
+        for argument, initial, expected in [('high', 'medium', 'high'), ('medium', 'high', 'medium'), ('low', 'medium', 'medium')]:
+            source = '''
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+import streamlit as st
+from src.agent import ToolContext
+from app import handle_command
+ctx = ToolContext(tools=Mock(), settings=SimpleNamespace(gemini_model='gemini-3.8-flash'), thinking_mode=INITIAL)
+st.session_state.messages = []
+st.session_state.contents = ['会話を維持']
+st.session_state.pending = None
+with patch('app.st.rerun'), patch('app.save_conversation') as save:
+    handle_command(COMMAND, ctx, ctx.settings, ctx.tools, Mock(), '', None, 0)
+st.session_state['mode'] = ctx.thinking_mode
+st.session_state['tools_called'] = bool(ctx.tools.mock_calls)
+'''.replace('INITIAL', repr(initial)).replace('COMMAND', repr('/thinking ' + argument))
+            app = AppTest.from_string(source).run(timeout=20)
+            self.assertFalse(app.exception)
+            self.assertEqual(app.session_state['mode'], expected)
+            self.assertEqual(app.session_state.contents, ['会話を維持'])
+            self.assertFalse(app.session_state['tools_called'])
+
     def test_usage_queries_and_monthly_cost_keep_model_specific_prices(self):
         self.assertAlmostEqual(gemini_cost_usd(1_000_000, 1_000_000), 2.8)
         self.assertAlmostEqual(gemini_cost_usd(1_000_000, 1_000_000, 'gemini-3.8-flash'), 9)

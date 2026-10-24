@@ -34,6 +34,7 @@ from src.bq_tools import (
 )
 from src.charts import KIND_LABELS, ChartSpec, suggest_chart
 from src.execution import BackgroundTurn, ExecutionStopped
+from src.commands import HELP, parse_command, usage_text
 from src.presentation import choose_presentation
 from src.config import (
     DEFAULT_MONTHLY_LIMIT_USD,
@@ -219,6 +220,7 @@ def reset_conversation(
     st.session_state.contents = []
     st.session_state.pending = None
     st.session_state.ctx = _new_context(settings, tools, usage_logger, user_email)
+    st.session_state.pop("command_output", None)
     st.session_state.conversation_owner = user_email
     st.session_state.history_id = uuid.uuid4().hex
     st.session_state.history_generation = 0
@@ -746,6 +748,9 @@ def submit_prompt(
     prompt: str, agent: GeminiAgent, ctx: ToolContext, question: str | None = None,
 ) -> None:
     """通常の質問と確認への回答を、同じ記録・実行経路に送る。"""
+    # コマンドはUI側の専用経路だけで扱う。直接呼び出されてもモデルへ送らない。
+    if parse_command(prompt) is not None:
+        raise ValueError("コマンドは質問として送信できません。")
     message = {"role": "user", "text": prompt}
     if question is not None:
         message["question"] = question
@@ -842,6 +847,53 @@ def render_confirmation(
 # --------------------------------------------------------------------
 # ページ
 # --------------------------------------------------------------------
+def handle_command(prompt, ctx, settings, tools, usage_logger, user_email,
+                   monthly_used_usd, monthly_limit_usd) -> bool:
+    command = parse_command(prompt)
+    if command is None:
+        return False
+    if command.name == "/help" and not command.argument:
+        output = HELP
+    elif command.name == "/usage" and not command.argument:
+        _, end_utc = jst_month_bounds_utc()
+        output = usage_text(
+            ctx, monthly_used_usd, monthly_limit_usd if user_email else None,
+            end_utc.astimezone(ZoneInfo("Asia/Tokyo")),
+        )
+    elif command.name == "/new" and not command.argument:
+        if st.session_state.get("history_dirty"):
+            save_conversation(ctx, st.session_state.get("history_status", "ready"))
+        if st.session_state.get("history_dirty"):
+            output = "現在の会話を保存できませんでした。履歴の再保存後に、新しいチャットを開始してください。"
+        else:
+            reset_conversation(settings, tools, usage_logger, user_email)
+            st.rerun()
+            return True
+    elif command.name == "/model" and not command.argument:
+        output = f"使用中のモデル：`{ctx.settings.gemini_model}`"
+    elif command.name == "/thinking":
+        mode = command.argument.lower()
+        if not mode:
+            output = (f"思考設定：**{ctx.thinking_mode}**（直近の実行：{ctx.active_thinking_level}）。\n\n"
+                      "`/thinking high` でhighを指定し、`/thinking medium` で通常設定へ戻します。")
+        elif mode not in ("medium", "high"):
+            output = "`/thinking high` または `/thinking medium` を指定してください。"
+        elif ctx.settings.gemini_model != "gemini-3.8-flash":
+            output = "この思考設定はGemini 3.8 Flashに対応しています。GEMINI_MODELの設定を確認してください。"
+        elif st.session_state.get("pending") is not None:
+            output = "実行確認待ちです。現在のクエリを実行または中止してから思考設定を変更してください。"
+        else:
+            ctx.thinking_mode = mode
+            if st.session_state.messages:
+                save_conversation(ctx)
+            output = ("**high** に切り替えました。次の質問から、複数の観点で検証する分析方針を適用します。"
+                      if mode == "high" else "**medium** に戻しました。通常の分析方針を適用します。")
+    else:
+        output = "コマンドまたは引数を確認してください。利用できるコマンドは `/help` で確認できます。"
+    st.session_state.command_output = output
+    st.rerun()
+    return True
+
 
 def render_chat_page(
     settings: Settings,
@@ -897,9 +949,15 @@ def render_chat_page(
             "今月はこれ以上ご利用いただけません。毎月1日 0:00（JST）にリセットされます。"
         )
 
+    if st.session_state.get("command_output"):
+        with st.container(border=True):
+            st.markdown(st.session_state.command_output)
+            if st.button("閉じる", key="close_command_output"):
+                st.session_state.pop("command_output", None)
+                st.rerun()
+
     prompt = st.chat_input(
-        "質問してください（例: 〇〇店の参加率の推移をグラフで見せて）",
-        disabled=pending is not None or blocked or awaiting_clarification,
+        "質問、または /help などのコマンドを入力",
     )
     if not prompt:
         if not st.session_state.messages and pending is None and not blocked:
@@ -908,6 +966,13 @@ def render_chat_page(
             )
         return
 
+    if handle_command(prompt, ctx, settings, tools, usage_logger, user_email,
+                      monthly_used_usd, monthly_limit_usd):
+        return
+    if pending is not None or blocked or awaiting_clarification:
+        st.warning("現在はコマンドのみ利用できます。確認待ちの場合は、上のフォームから回答してください。")
+        return
+    st.session_state.pop("command_output", None)
     submit_prompt(prompt, agent, ctx)
 
 
