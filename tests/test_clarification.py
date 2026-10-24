@@ -107,13 +107,16 @@ from app import process_turn, render_clarification, render_message
 from src.agent import AnswerResult, ClarificationResult, ToolContext
 
 class Agent:
+    def __init__(self, selection_mode):
+        self.selection_mode = selection_mode
+
     def run(self, contents, ctx, on_progress):
         if contents[-1].parts[0].text.startswith('確認への回答'):
             return AnswerResult('分析を続けました。')
         return ClarificationResult('比較する期間を教えてください。', ['今月と先月', '今年と昨年'],
-                                   st.session_state.get('selection_mode', 'single'))
+                                   self.selection_mode)
 
-agent = Agent()
+agent = Agent(st.session_state.get('selection_mode', 'single'))
 if 'ctx' not in st.session_state:
     st.session_state.ctx = ToolContext(tools=Mock(), settings=SimpleNamespace(chat_history_bucket=''))
     st.session_state.messages = [{'role': 'user', 'text': '来店数をグラフで比較して'}]

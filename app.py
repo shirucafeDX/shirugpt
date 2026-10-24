@@ -33,6 +33,7 @@ from src.bq_tools import (
     technical_detail,
 )
 from src.charts import KIND_LABELS, ChartSpec, suggest_chart
+from src.execution import BackgroundTurn, ExecutionStopped
 from src.presentation import choose_presentation
 from src.config import (
     DEFAULT_MONTHLY_LIMIT_USD,
@@ -203,6 +204,9 @@ def reset_conversation(
     usage_logger: UsageLogger,
     user_email: str,
 ) -> None:
+    active_turn = st.session_state.pop("active_turn", None)
+    if active_turn is not None:
+        active_turn.control.request_stop()
     if st.session_state.get("conversation_owner") != user_email:
         st.session_state.pop("history_entries", None)
         st.session_state.history_list_error = ""
@@ -270,12 +274,13 @@ def render_history(settings, tools, usage_logger, user_email, ctx) -> None:
         st.caption("履歴の保存・再開にはログインが必要です。")
         return
     store = history_store(settings.chat_history_bucket, settings.gcp_project)
+    running = st.session_state.get("active_turn") is not None
     if st.session_state.history_error:
         st.warning(st.session_state.history_error)
-        if st.button("再保存"):
+        if st.button("再保存", disabled=running):
             save_conversation(ctx, st.session_state.history_status)
             st.rerun()
-        if st.button("別の会話として保存"):
+        if st.button("別の会話として保存", disabled=running):
             st.session_state.history_id = uuid.uuid4().hex
             st.session_state.history_generation = 0
             save_conversation(ctx, st.session_state.history_status)
@@ -297,7 +302,7 @@ def render_history(settings, tools, usage_logger, user_email, ctx) -> None:
     if not entries:
         st.caption("保存された会話はありません。")
         return
-    dirty = st.session_state.history_dirty
+    dirty = st.session_state.history_dirty or st.session_state.get("active_turn") is not None
     # 履歴内だけを装飾する。標準ウィジェットのキーボード操作は維持する。
     st.markdown("""
 <style>
@@ -517,7 +522,7 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
     if not runs:
         return
     plan = choose_presentation(message.get("question", ""), runs, shown)
-    if message.get("is_error"):
+    if message.get("is_error") or message.get("is_stopped"):
         plan.mode = "none"
     if plan.mode == "table":
         if plan.note:
@@ -572,7 +577,7 @@ def render_sidebar(
     monthly_limit_usd: float,
 ) -> None:
     with st.sidebar:
-        if st.button("新しいチャット", width="stretch", disabled=st.session_state.history_dirty):
+        if st.button("新しいチャット", width="stretch", disabled=st.session_state.history_dirty or st.session_state.get("active_turn") is not None):
             reset_conversation(settings, tools, usage_logger, user_email)
             st.rerun()
 
@@ -604,6 +609,9 @@ def render_sidebar(
             st.divider()
             st.write(f"ログイン中: {user_email}")
             if st.button("ログアウト", width="stretch"):
+                active_turn = st.session_state.get("active_turn")
+                if active_turn is not None:
+                    active_turn.control.request_stop()
                 st.logout()
 
 
@@ -612,12 +620,53 @@ def render_sidebar(
 # --------------------------------------------------------------------
 def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
     question = next((m.get("question", m["text"]) for m in reversed(st.session_state.messages) if m["role"] == "user"), "")
+    task = st.session_state.get("active_turn")
+    if task is None:
+        task = BackgroundTurn(agent, st.session_state.contents, ctx)
+        st.session_state.active_turn = task
+        task.start()
     try:
+        st.markdown("""
+<style>
+.st-key-execution_stop button {
+    border-radius: 50%; width: 2.75rem; height: 2.75rem;
+    min-height: 2.75rem; padding: 0; border: none;
+    background: transparent; color: inherit;
+}
+.st-key-execution_stop button::before {
+    content: ""; display: block; width: 2.75rem; height: 2.75rem;
+    background: currentColor;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 44'%3E%3Cpath fill-rule='evenodd' d='M22 1a21 21 0 1 0 0 42a21 21 0 1 0 0-42M16 16h12v12H16z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.st-key-execution_stop button:focus-visible {
+    outline: 2px solid currentColor; outline-offset: 3px;
+}
+.st-key-execution_stop button:disabled {
+    opacity: .4;
+}
+.st-key-execution_stop button > div {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%);
+}
+</style>
+""", unsafe_allow_html=True)
+        st.button(
+            "実行を停止", key="execution_stop", help="実行を停止",
+            on_click=task.control.request_stop,
+            disabled=task.done.is_set() or task.control.stopped.is_set(),
+        )
         with st.status("質問に合う調べ方を考えています…", expanded=False) as status:
-            result = agent.run(
-                st.session_state.contents, ctx,
-                on_progress=lambda message: status.update(label=message),
-            )
+            while not task.done.wait(timeout=0.2):
+                # このUI更新でStreamlitに制御を返し、停止クリックによる再実行を受ける。
+                status.update(label="停止しています…（実行中のリクエストの終了を待っています）" if task.control.stopped.is_set() else task.message)
+            status.update(label=task.message)
+            if task.control.stopped.is_set():
+                status.update(label="処理を停止しました", state="complete")
+        if task.control.stopped.is_set():
+            raise ExecutionStopped()
+        if task.error is not None:
+            raise task.error
+        result = task.result
         if isinstance(result, ConfirmationPending):
             st.session_state.pending = result
         elif isinstance(result, (AnswerResult, ClarificationResult)):
@@ -640,6 +689,29 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
             # 通常発生しない想定外の戻り値（実行環境側の一時的な異常等）。
             # 他の例外と同じ経路で扱い、アプリ全体を落とさない。
             raise AssertionError(f"想定外の戻り値: {result!r}")
+    except ExecutionStopped:
+        contents = st.session_state.contents
+        # 実行途中のツール要求にも応答を付け、次の質問で会話形式が壊れないようにする。
+        if contents and contents[-1].role == "model":
+            calls = [part.function_call for part in (contents[-1].parts or []) if part.function_call]
+            if calls:
+                contents.append(types.Content(role="user", parts=[
+                    types.Part(function_response=types.FunctionResponse(
+                        id=call.id, name=call.name,
+                        response={"status": "stopped", "message": "ユーザーが処理を停止しました。途中の結果がある場合も、この調査を自動で続行しないでください。"},
+                    )) for call in calls
+                ]))
+        ctx.resume_calls = None
+        st.session_state.pending = None
+        text = "処理を停止しました。"
+        if contents and contents[-1].role == "model":
+            # 完了直前の停止で生成済みの回答があれば、未表示の回答を停止通知に置き換える。
+            contents.pop()
+        contents.append(types.Content(role="model", parts=[types.Part.from_text(text=text)]))
+        st.session_state.messages.append({
+            "role": "assistant", "text": text, "question": question,
+            "runs": list(ctx.turn_runs), "errors": list(ctx.turn_errors), "is_stopped": True,
+        })
     except Exception as exc:  # noqa: BLE001 - ユーザーには整形して見せる
         detail = technical_detail(exc, limit=10_000)
         if ctx.usage_logger is not None:
@@ -665,6 +737,7 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
                 "is_error": True,
             }
         )
+    st.session_state.pop("active_turn", None)
     save_conversation(ctx)
     st.rerun()
 
@@ -769,6 +842,7 @@ def render_confirmation(
 # --------------------------------------------------------------------
 # ページ
 # --------------------------------------------------------------------
+
 def render_chat_page(
     settings: Settings,
     tools: BigQueryTools,
@@ -798,6 +872,10 @@ def render_chat_page(
     shown: set[str] = set()
     for msg_idx, message in enumerate(st.session_state.messages):
         render_message(message, msg_idx, shown)
+
+    if st.session_state.get("active_turn") is not None:
+        process_turn(agent, ctx)
+        return
 
     last_message = st.session_state.messages[-1] if st.session_state.messages else {}
     awaiting_clarification = bool(

@@ -33,6 +33,7 @@ from .bq_tools import (
 from .config import Settings, human_bytes
 from .sql_guard import SQLGuardError
 from .usage_log import UsageLogger
+from .execution import ExecutionControl, ExecutionStopped
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,7 @@ class ToolContext:
     query_cache: dict[str, QueryRun] = field(default_factory=dict)
     decisions: dict[str, str] = field(default_factory=dict)
     resume_calls: list[Any] | None = None
+    execution_control: ExecutionControl | None = None
 
     # 直近ターンの記録（UI 表示用）
     turn_runs: list[QueryRun] = field(default_factory=list)
@@ -503,9 +505,13 @@ class GeminiAgent:
 
         try:
             payload = self._call_tool(name, args, ctx)
+        except ExecutionStopped:
+            raise
         except _Pending:
             raise
         except (SQLGuardError, BQToolError) as exc:
+            if ctx.execution_control is not None:
+                ctx.execution_control.check()
             ctx.turn_errors.append(self._error_report(name, args, str(exc)))
             payload = {"error": str(exc)}
             if ctx.usage_logger is not None:
@@ -518,6 +524,8 @@ class GeminiAgent:
                     error_text=technical_detail(exc, limit=10_000),
                 )
         except Exception as exc:  # noqa: BLE001 - Gemini に自己修正させる
+            if ctx.execution_control is not None:
+                ctx.execution_control.check()
             detail = technical_detail(exc)
             ctx.turn_errors.append(
                 self._error_report(name, args, friendly_error(exc), detail)
@@ -606,6 +614,8 @@ class GeminiAgent:
         processed_tools = False
 
         for _ in range(self.settings.max_tool_iterations):
+            if ctx.execution_control is not None:
+                ctx.execution_control.check()
             if pending_calls is None:
                 if on_progress is not None:
                     on_progress(
@@ -616,6 +626,8 @@ class GeminiAgent:
                 try:
                     response = self._generate(contents)
                 except Exception as exc:  # noqa: BLE001 - 記録してから同じ例外を上に伝える
+                    if ctx.execution_control is not None:
+                        ctx.execution_control.check()
                     if ctx.usage_logger is not None:
                         ctx.usage_logger.log_error(
                             user_email=ctx.user_email,
@@ -652,6 +664,8 @@ class GeminiAgent:
                             total_tokens=total_tokens,
                             thinking_tokens=thinking_tokens,
                         )
+                if ctx.execution_control is not None:
+                    ctx.execution_control.check()
                 candidate = (response.candidates or [None])[0]
                 reason_value = getattr(candidate, "finish_reason", None)
                 reason = getattr(reason_value, "value", str(reason_value)) if reason_value else None
@@ -703,6 +717,8 @@ class GeminiAgent:
                 clarification_call = next((call for call in pending_calls if call.name == "ask_clarification"), None)
                 clarification = None
                 for call in pending_calls:
+                    if ctx.execution_control is not None:
+                        ctx.execution_control.check()
                     if clarification_call is not None and call is not clarification_call:
                         responses.append(types.Part.from_function_response(
                             name=call.name, response={"error": "ユーザーへの確認を優先したため未実行です。回答後に必要なら再度呼んでください。"},
@@ -712,6 +728,8 @@ class GeminiAgent:
                         on_progress(tool_progress(call))
                     tool_response = self._dispatch(call, ctx)
                     responses.append(tool_response)
+                    if ctx.execution_control is not None:
+                        ctx.execution_control.check()
                     payload = tool_response.function_response.response
                     if call.name == "ask_clarification" and payload.get("status") == "awaiting_user":
                         clarification = ClarificationResult(

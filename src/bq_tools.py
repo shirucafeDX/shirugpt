@@ -19,6 +19,7 @@ from google.cloud import bigquery
 from .config import Settings, human_bytes
 from .sql_guard import GuardResult, SQLGuardError, check_sql
 from .summarize import summarize_dataframe
+from .execution import ExecutionControl
 
 
 class BQToolError(RuntimeError):
@@ -79,8 +80,10 @@ def _flatten_schema(
 class BigQueryTools:
     """allowlist で保護された BigQuery アクセス。"""
 
-    def __init__(self, settings: Settings, client: bigquery.Client | None = None):
+    def __init__(self, settings: Settings, client: bigquery.Client | None = None,
+                 execution_control: ExecutionControl | None = None):
         self.settings = settings
+        self.execution_control = execution_control
         self.client = client or bigquery.Client(
             project=settings.gcp_project,
             location=settings.bq_location,
@@ -229,6 +232,8 @@ class BigQueryTools:
         self, guard: GuardResult, estimated_bytes: int, *, purpose: str = ""
     ) -> QueryRun:
         """検査済みの SQL を実行して DataFrame と要約を返す。"""
+        if self.execution_control is not None:
+            self.execution_control.check()
         job_config = bigquery.QueryJobConfig(
             maximum_bytes_billed=self.settings.max_bytes_billed,
             use_query_cache=True,
@@ -237,8 +242,15 @@ class BigQueryTools:
             guard.sql, job_config=job_config, location=self.settings.bq_location
         )
         cap = self.settings.max_result_rows
-        rows = job.result(max_results=cap + 1)
-        df = rows.to_dataframe(create_bqstorage_client=False)
+        try:
+            if self.execution_control is not None:
+                self.execution_control.set_query_job(job)
+                self.execution_control.check()
+            rows = job.result(max_results=cap + 1)
+            df = rows.to_dataframe(create_bqstorage_client=False)
+        finally:
+            if self.execution_control is not None:
+                self.execution_control.clear_query_job()
 
         truncated = len(df) > cap
         if truncated:
