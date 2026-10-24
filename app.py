@@ -208,7 +208,7 @@ def reset_conversation(
         st.session_state.history_list_error = ""
     # 会話を切り替えたとき、以前の図表ウィジェットの選択を持ち越さない。
     for key in list(st.session_state):
-        if key.startswith(("chart_", "dl_")):
+        if key.startswith(("chart_", "dl_", "clarification_")):
             del st.session_state[key]
     st.session_state.messages = []
     st.session_state.contents = []
@@ -694,31 +694,49 @@ def submit_prompt(
     process_turn(agent, ctx)
 
 
+def toggle_clarification_choice(choice_key: str, option: str, selection_mode: str) -> None:
+    selected = list(st.session_state.get(choice_key, []))
+    if option in selected:
+        selected.remove(option)
+    elif selection_mode == "multi":
+        selected.append(option)
+    else:
+        selected = [option]
+    st.session_state[choice_key] = selected
+
+
 def render_clarification(
     message: dict[str, Any], msg_idx: int, agent: GeminiAgent,
     ctx: ToolContext, blocked: bool = False,
 ) -> None:
     selection_mode = message["clarification"].get("selection_mode", "single")
-    with st.form(f"clarification_{ctx.session_id}_{msg_idx}"):
-        selected = st.pills(
-            "選択肢から回答（複数選択可）" if selection_mode == "multi" else "選択肢から回答（1つ選択）",
-            message["clarification"]["options"], selection_mode=selection_mode,
-            default=None, disabled=blocked,
-            key=f"clarification_choice_{ctx.session_id}_{msg_idx}",
-        )
-        st.caption("選んだ項目をもう一度クリックすると選択を解除できます。")
+    prefix = f"clarification_{ctx.session_id}_{msg_idx}"
+    choice_key = f"{prefix}_choices"
+    selected = st.session_state.get(choice_key, [])
+    with st.container(border=True):
+        st.markdown("選択肢から回答（複数選択可）" if selection_mode == "multi" else "選択肢から回答（1つ選択）")
+        with st.container(horizontal=True):
+            for index, option in enumerate(message["clarification"]["options"], start=1):
+                st.button(
+                    f"{index}. {option}", key=f"{prefix}_option_{index}",
+                    type="primary" if option in selected else "secondary",
+                    disabled=blocked, shortcut=str(index),
+                    on_click=toggle_clarification_choice,
+                    args=(choice_key, option, selection_mode),
+                )
+        st.caption("クリックまたは数字キー（1〜5）で選択・解除できます。文字入力中は数字キーで選択されません。")
         free_text = st.text_area(
             "自由記述・補足（選択せずに入力することもできます）", disabled=blocked,
+            key=f"{prefix}_free_text",
         )
-        submitted = st.form_submit_button("回答して続ける", type="primary", disabled=blocked)
+        submitted = st.button("回答して続ける", type="primary", disabled=blocked, key=f"{prefix}_submit")
     if not submitted or blocked:
         return
     free_text = free_text.strip()
     if not selected and not free_text:
         st.warning("選択肢を選ぶか、自由記述を入力してください。")
         return
-    selected_values = selected if selection_mode == "multi" else [selected]
-    answer = "\n".join(part for part in [*(selected_values or []), free_text] if part)
+    answer = "\n".join(part for part in [*selected, free_text] if part)
     message["clarification"]["answered"] = True
     submit_prompt(
         f"確認への回答（{message['text']}）：\n{answer}", agent, ctx,

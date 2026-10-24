@@ -129,42 +129,60 @@ if last.get('clarification') and not last['clarification']['answered']:
 
 
 class ClarificationUITests(unittest.TestCase):
+    def choices(self, app):
+        return [b for b in app.button if b.key and '_option_' in b.key]
+
+    def selected(self, app):
+        return [b.label.split('. ', 1)[1] for b in self.choices(app) if b.proto.type == 'primary']
+
+    def choose(self, app, number):
+        self.choices(app)[number - 1].click().run()
+        self.assertFalse(app.exception)
+
+    def submit(self, app):
+        next(b for b in app.button if b.label == '回答して続ける').click().run()
+        self.assertFalse(app.exception)
+
     def open(self, selection_mode='single'):
         app = AppTest.from_string(UI_SOURCE)
         app.session_state['selection_mode'] = selection_mode
         app.run(timeout=20)
-        self.assertEqual(len(app.exception), 0)
-        self.assertEqual(app.pills[0].value, [] if selection_mode == 'multi' else None)
+        self.assertFalse(app.exception)
+        self.assertEqual(self.selected(app), [])
         return app
+
+    def test_number_shortcuts_are_assigned_to_choices(self):
+        app = self.open()
+        self.assertEqual([b.label for b in self.choices(app)], ['1. 今月と先月', '2. 今年と昨年'])
+        self.assertEqual([b.proto.shortcut for b in self.choices(app)], ['1', '2'])
 
     def test_selection_and_supplement_continue_analysis_and_preserve_original_request(self):
         app = self.open()
-        app.pills[0].set_value('今月と先月')
-        app.text_area[0].input('東京の店舗だけ')
-        app.button[0].click().run()
-        self.assertEqual(len(app.exception), 0)
+        app.text_area[0].input('東京の店舗だけ').run()
+        self.choose(app, 1)
+        self.assertEqual(app.text_area[0].value, '東京の店舗だけ')
+        self.submit(app)
         messages = app.session_state.messages
         self.assertTrue(messages[1]['clarification']['answered'])
         self.assertIn('今月と先月', messages[2]['text'])
         self.assertIn('東京の店舗だけ', messages[2]['text'])
         self.assertEqual(messages[-1]['question'], '来店数をグラフで比較して')
         self.assertEqual(messages[-1]['text'], '分析を続けました。')
-        self.assertEqual(len(app.pills), 0)
+        self.assertEqual(self.choices(app), [])
         app.run()
         self.assertEqual(len(app.session_state.messages), 4)
 
     def test_free_text_only_is_accepted(self):
         app = self.open()
         app.text_area[0].input('2025年4月と2026年4月')
-        app.button[0].click().run()
-        self.assertEqual(len(app.exception), 0)
+        self.submit(app)
         self.assertIn('2025年4月と2026年4月', app.session_state.messages[2]['text'])
-        self.assertEqual(len(app.pills), 0)
+        self.assertEqual(self.choices(app), [])
 
     def test_empty_answer_does_not_continue(self):
         app = self.open()
         app.text_area[0].input('  ')
-        app.button[0].click().run()
+        self.submit(app)
         self.assertEqual(len(app.warning), 1)
         self.assertEqual(len(app.session_state.messages), 2)
         self.assertFalse(app.session_state.messages[-1]['clarification']['answered'])
@@ -173,37 +191,32 @@ class ClarificationUITests(unittest.TestCase):
         app = self.open()
         app.session_state['blocked'] = True
         app.run()
-        self.assertTrue(app.pills[0].disabled)
+        self.assertTrue(all(b.disabled for b in app.button))
         self.assertTrue(app.text_area[0].disabled)
-        self.assertTrue(app.button[0].disabled)
         self.assertEqual(len(app.session_state.messages), 2)
 
     def test_single_choice_can_be_changed_and_cleared(self):
         app = self.open()
-        app.pills[0].set_value('今月と先月').run()
-        self.assertEqual(app.pills[0].value, '今月と先月')
-        app.pills[0].set_value('今年と昨年').run()
-        self.assertEqual(app.pills[0].value, '今年と昨年')
-        # AppTest の set_value(None) は既存値に戻るため、解除時のブラウザ送信を再現する。
-        widget_states = app._tree.get_widget_states()
-        for state in widget_states.widgets:
-            if state.id == app.pills[0].id:
-                state.string_array_value.data[:] = []
-        app._run(widget_state=widget_states)
-        self.assertIsNone(app.pills[0].value)
-        app.button[0].click().run()
+        self.choose(app, 1)
+        self.assertEqual(self.selected(app), ['今月と先月'])
+        self.choose(app, 2)
+        self.assertEqual(self.selected(app), ['今年と昨年'])
+        self.choose(app, 2)
+        self.assertEqual(self.selected(app), [])
+        self.submit(app)
         self.assertEqual(len(app.warning), 1)
         self.assertEqual(len(app.session_state.messages), 2)
 
     def test_multiple_choices_and_supplement_are_submitted(self):
         app = self.open('multi')
-        app.pills[0].set_value(['今月と先月', '今年と昨年']).run()
-        app.pills[0].unselect('今月と先月').run()
-        self.assertEqual(app.pills[0].value, ['今年と昨年'])
-        app.pills[0].set_value(['今月と先月', '今年と昨年'])
+        self.choose(app, 1)
+        self.choose(app, 2)
+        self.assertEqual(self.selected(app), ['今月と先月', '今年と昨年'])
+        self.choose(app, 1)
+        self.assertEqual(self.selected(app), ['今年と昨年'])
+        self.choose(app, 1)
         app.text_area[0].input('東京の店舗だけ')
-        app.button[0].click().run()
-        self.assertFalse(app.exception)
+        self.submit(app)
         answer = app.session_state.messages[2]['text']
         self.assertIn('今月と先月', answer)
         self.assertIn('今年と昨年', answer)
@@ -215,8 +228,6 @@ class ClarificationUITests(unittest.TestCase):
         app.session_state.messages[-1]['clarification'].pop('selection_mode')
         app.run()
         self.assertFalse(app.exception)
-        self.assertIsNone(app.pills[0].value)
-        app.pills[0].set_value('今月と先月')
-        app.button[0].click().run()
-        self.assertFalse(app.exception)
+        self.choose(app, 1)
+        self.submit(app)
         self.assertIn('今月と先月', app.session_state.messages[2]['text'])
