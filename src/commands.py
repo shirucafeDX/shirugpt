@@ -23,7 +23,7 @@ HELP = """\
 | `/new` | 新しいチャットを開始 |
 | `/usage` | 当月のInput・Output（思考を含む）、クエリ量、費用と残額 |
 | `/thinking` | 詳細分析モードを切り替え。有効時High、解除時は元のeffortへ戻す |
-| `/effort` | Low / Medium / Highを選択（1・2・3、上下キーにも対応） |
+| `/effort` | Low / Medium / Highを選択（クリック・上下キーとEnterで選択） |
 
 コマンドはアプリ内で処理し、Geminiへ送信しません。
 """

@@ -864,7 +864,7 @@ def render_confirmation(
 # --------------------------------------------------------------------
 # ページ
 # --------------------------------------------------------------------
-def set_effort(ctx: ToolContext, mode: str) -> str:
+def set_effort(ctx: ToolContext, mode: str) -> str | None:
     if mode not in ("low", "medium", "high"):
         return "`/effort` の選択画面でLow、Medium、Highを選んでください。"
     if ctx.settings.gemini_model != "gemini-3.8-flash":
@@ -874,29 +874,20 @@ def set_effort(ctx: ToolContext, mode: str) -> str:
     ctx.thinking_mode = mode
     if st.session_state.messages:
         save_conversation(ctx)
-    return f"effortを **{mode.title()}** に切り替えました。会話とプロンプトは維持します。"
-
-
-def render_effort_panel(ctx: ToolContext) -> None:
-    with st.container(border=True, key="effort_picker"):
-        st.markdown(f"思考レベル：**{ctx.thinking_mode.title()}**")
-        disabled = st.session_state.get("pending") is not None or ctx.settings.gemini_model != "gemini-3.8-flash"
-        with st.container(horizontal=True):
-            for number, (mode, label) in enumerate((("low", "Low"), ("medium", "Medium"), ("high", "High")), start=1):
-                if st.button(f"{number}. {label}", key=f"effort_{mode}", disabled=disabled, shortcut=str(number),
-                             type="primary" if ctx.thinking_mode == mode else "secondary"):
-                    st.session_state.command_output = set_effort(ctx, mode)
-                    st.rerun()
-        st.caption("Low / Medium / High：モデルの思考量を調整します。プロンプトは変更しません。1・2・3で切り替え、↑↓で移動、Enterで確定できます。文字入力中は数字キーで切り替わりません。")
-        if disabled:
-            st.caption("実行確認待ち、または対応外モデルのため変更できません。")
-        if st.button("閉じる", key="close_effort_panel"):
-            st.session_state.pop("effort_panel", None)
-            st.rerun()
+    return None
 
 
 def render_prompt_input(ctx: ToolContext) -> str | None:
-    color = {"low": "#0d9488", "medium": "#3b82f6", "high": "#8b5cf6"}.get(ctx.thinking_mode, "#3b82f6")
+    mode = st.session_state.pop("keyboard_effort", None)
+    if mode is not None:
+        error = set_effort(ctx, mode)
+        st.session_state.pop("effort_panel", None)
+        if error:
+            st.session_state.command_output = error
+        else:
+            st.session_state.pop("command_output", None)
+        st.rerun()
+    color = {"low": "#0d9488", "medium": "#3b82f6", "high": "#8b5cf6"}.get(getattr(ctx, "thinking_mode", "medium"), "#3b82f6")
     st.markdown("""
 <style>
 .st-key-prompt_input [data-testid="stChatInput"] {
@@ -910,7 +901,8 @@ def render_prompt_input(ctx: ToolContext) -> str | None:
 </style>
 """.replace("__COLOR__", color), unsafe_allow_html=True)
     prompt = st.chat_input("質問、または /help などのコマンドを入力", key="prompt_input")
-    render_command_menu()
+    render_command_menu(effort_open=bool(st.session_state.get("effort_panel")),
+                        effort=getattr(ctx, "thinking_mode", "medium"))
     return st.session_state.pop("keyboard_command", None) or prompt
 
 
@@ -966,6 +958,10 @@ def handle_command(prompt, ctx, settings, tools, usage_logger, user_email,
                 save_conversation(ctx)
     elif command.name == "/effort":
         if not command.argument:
+            if st.session_state.get("pending") is not None or ctx.settings.gemini_model != "gemini-3.8-flash":
+                st.session_state.command_output = "実行確認待ち、または対応外モデルのため変更できません。"
+                st.rerun()
+                return True
             st.session_state.effort_panel = True
             st.session_state.pop("command_output", None)
             st.rerun()
@@ -1041,9 +1037,6 @@ def render_chat_page(
             if st.button("閉じる", key="close_command_output"):
                 st.session_state.pop("command_output", None)
                 st.rerun()
-
-    if st.session_state.get("effort_panel"):
-        render_effort_panel(ctx)
 
     prompt = render_prompt_input(ctx)
     if not prompt:

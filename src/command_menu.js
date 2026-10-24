@@ -1,11 +1,19 @@
 export default function ({ data, parentElement, setTriggerValue }) {
-  const commands = data || [];
+  // v2はデータ更新時にも関数を呼ぶ。前回のイベントとポータルを先に片付ける。
+  parentElement.__shiruMenuCleanup?.();
+  const commands = data?.commands || [];
+  const effortOpen = Boolean(data?.effort_open);
+  const efforts = [
+    {command: "Low", mode: "low", description: "思考量を抑える"},
+    {command: "Medium", mode: "medium", description: "通常の思考量"},
+    {command: "High", mode: "high", description: "思考量を増やす"},
+  ];
   const menu = document.createElement("div");
   const id = `slash-menu-${crypto.randomUUID()}`;
   menu.id = id;
   menu.className = "shiru-command-menu";
   menu.setAttribute("role", "listbox");
-  menu.setAttribute("aria-label", "コマンド候補");
+  menu.setAttribute("aria-label", effortOpen ? "effortの選択" : "コマンド候補");
   menu.hidden = true;
   const style = document.createElement("style");
   style.textContent = `
@@ -36,8 +44,7 @@ export default function ({ data, parentElement, setTriggerValue }) {
   let selected = 0;
   let dismissedValue = null;
   let previousAttributes = {};
-  let effortPanel = null;
-  let effortReady = false;
+
   let questionPanel = null;
   let questionReady = false;
   const attributes = ["aria-autocomplete", "aria-expanded", "aria-controls", "aria-activedescendant"];
@@ -76,6 +83,11 @@ export default function ({ data, parentElement, setTriggerValue }) {
   function complete(index, execute = true) {
     const choice = matches[index];
     if (!choice || !input) return;
+    if (effortOpen) {
+      hide();
+      setTriggerValue("action", {kind: "effort", mode: choice.mode});
+      return;
+    }
     if (execute) {
       // サーバーのローカルコマンド処理へ渡し、モデルには送信しない。
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(input, "");
@@ -95,12 +107,12 @@ export default function ({ data, parentElement, setTriggerValue }) {
   }
 
   function refresh() {
-    if (!input || document.activeElement !== input || input.disabled) return hide();
+    if (!input || (!effortOpen && document.activeElement !== input) || input.disabled) return hide();
     const value = input.value;
     const query = value.trimStart().toLowerCase();
-    if (!query.startsWith("/") || query.includes("\n") || value === dismissedValue) return hide();
+    if (!effortOpen && (!query.startsWith("/") || query.includes("\n") || value === dismissedValue)) return hide();
     dismissedValue = null;
-    matches = commands.filter(item => item.command.startsWith(query));
+    matches = effortOpen ? efforts : commands.filter(item => item.command.startsWith(query));
     if (!matches.length) return hide();
     menu.replaceChildren();
     matches.forEach((item, i) => {
@@ -110,7 +122,7 @@ export default function ({ data, parentElement, setTriggerValue }) {
       button.id = `${id}-${i}`;
       button.setAttribute("role", "option");
       const name = document.createElement("strong");
-      name.textContent = `${i + 1}. ${item.command}`;
+      name.textContent = item.command + (effortOpen && item.mode === data.effort ? " ✓" : "");
       const description = document.createElement("span");
       description.textContent = item.description;
       button.append(name, description);
@@ -120,28 +132,17 @@ export default function ({ data, parentElement, setTriggerValue }) {
       menu.appendChild(button);
     });
     const hint = document.createElement("footer");
-    hint.textContent = "数字 / Enterで実行 · ↑↓で選択 · Tabで入力 · Escで閉じる";
+    hint.textContent = "↑↓で選択 · Enterで確定 · Escで閉じる";
     menu.appendChild(hint);
     menu.hidden = false;
     input.setAttribute("aria-expanded", "true");
     position();
-    highlight(0);
+    highlight(effortOpen ? Math.max(0, efforts.findIndex(item => item.mode === data.effort)) : 0);
   }
 
   function keydown(event) {
     const editing = event.target instanceof Element && event.target.closest('input, textarea, [contenteditable="true"]');
-    if (!editing && effortPanel && ["ArrowDown", "ArrowUp"].includes(event.key)
-        && !event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
-      const buttons = [...effortPanel.querySelectorAll('.st-key-effort_low button:not(:disabled), .st-key-effort_medium button:not(:disabled), .st-key-effort_high button:not(:disabled)')];
-      if (!buttons.length) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      const current = buttons.indexOf(document.activeElement);
-      const next = current < 0 ? 0 : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
-      buttons[next].focus();
-      return;
-    }
-    if (!editing && !effortPanel && questionPanel && !event.isComposing && event.keyCode !== 229
+    if (!editing && !effortOpen && questionPanel && !event.isComposing && event.keyCode !== 229
         && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
       const buttons = [...questionPanel.querySelectorAll('[class*="_option_"] button:not(:disabled)')];
       const panel = [...questionPanel.classList].find(name => name.startsWith("st-key-clarification_picker_"))?.slice(7);
@@ -166,17 +167,15 @@ export default function ({ data, parentElement, setTriggerValue }) {
         return;
       }
     }
-    if (event.target !== input || menu.hidden || event.isComposing || event.keyCode === 229) return;
-    if (!["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key) && !/^[1-9]$/.test(event.key)) return;
+    if ((event.target !== input && !menu.contains(event.target)) || menu.hidden || event.isComposing || event.keyCode === 229) return;
+    if (!["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) return;
     if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
-    if (/^[1-9]$/.test(event.key) && Number(event.key) > matches.length) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (/^[1-9]$/.test(event.key)) {
-      complete(Number(event.key) - 1);
-    } else if (event.key === "Escape") {
+    if (event.key === "Escape") {
       dismissedValue = input.value;
       hide();
+      if (effortOpen) setTriggerValue("action", {kind: "close_effort"});
     } else if (event.key === "ArrowDown") {
       highlight((selected + 1) % matches.length);
     } else if (event.key === "ArrowUp") {
@@ -186,7 +185,10 @@ export default function ({ data, parentElement, setTriggerValue }) {
     }
   }
 
-  function blur() { hide(); }
+  function blur() {
+    hide();
+    if (effortOpen) setTriggerValue("action", {kind: "close_effort"});
+  }
   function detach() {
     if (!input) return;
     input.removeEventListener("input", refresh);
@@ -199,21 +201,10 @@ export default function ({ data, parentElement, setTriggerValue }) {
     input = null;
   }
   function attach() {
-    const panel = document.querySelector('.st-key-effort_picker');
-    if (panel !== effortPanel) {
-      effortPanel = panel;
-      effortReady = false;
-    }
-    if (panel && !effortReady) {
-      const button = panel.querySelector('.st-key-effort_low button:not(:disabled), .st-key-effort_medium button:not(:disabled), .st-key-effort_high button:not(:disabled)');
-      if (button) {
-        button.focus();
-        effortReady = true;
-      }
-    }
+    position();
     const question = document.querySelector('[class*="st-key-clarification_picker_"]');
     if (question !== questionPanel) { questionPanel = question; questionReady = false; }
-    if (question && !questionReady && !panel) {
+    if (question && !questionReady && !effortOpen) {
       const button = question.querySelector('[class*="_option_"] button:not(:disabled)');
       if (button) { button.focus(); questionReady = true; }
     }
@@ -230,6 +221,7 @@ export default function ({ data, parentElement, setTriggerValue }) {
     input.addEventListener("input", refresh);
     input.addEventListener("focus", refresh);
     input.addEventListener("blur", blur);
+    if (effortOpen) input.focus();
     refresh();
   }
   const observer = new MutationObserver(attach);
@@ -239,7 +231,7 @@ export default function ({ data, parentElement, setTriggerValue }) {
   window.addEventListener("scroll", position, true);
   window.visualViewport?.addEventListener("resize", position);
   attach();
-  return () => {
+  const cleanup = () => {
     observer.disconnect();
     document.removeEventListener("keydown", keydown, true);
     window.removeEventListener("resize", position);
@@ -248,5 +240,10 @@ export default function ({ data, parentElement, setTriggerValue }) {
     detach();
     menu.remove();
     style.remove();
+  };
+  parentElement.__shiruMenuCleanup = cleanup;
+  return () => {
+    cleanup();
+    if (parentElement.__shiruMenuCleanup === cleanup) delete parentElement.__shiruMenuCleanup;
   };
 }
