@@ -175,7 +175,7 @@ def load_settings() -> Settings:
         default_row_limit=_int("DEFAULT_ROW_LIMIT", 1000),
         max_result_rows=_int("MAX_RESULT_ROWS", 5000),
         sample_rows=_int("SAMPLE_ROWS", 500),
-        max_tool_iterations=_int("MAX_TOOL_ITERATIONS", 12),
+        max_tool_iterations=_int("MAX_TOOL_ITERATIONS", 50),
         log_dataset=log_dataset,
         log_table=_str("BQ_LOG_TABLE", "usage_events"),
         limit_table=_str("BQ_LIMIT_TABLE", "user_limits"),

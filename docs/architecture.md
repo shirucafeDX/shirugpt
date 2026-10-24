@@ -97,7 +97,7 @@ Gemini は「答えるために何が必要か」を 1 回では判断しきれ�
 
 ```python
 # src/agent.py: run()
-for _ in range(self.settings.max_tool_iterations):   # 暴走防止の上限（既定 12）
+for _ in range(self.settings.max_tool_iterations):   # 暴走防止の上限（既定 50）
     response = self._generate(contents)
     calls = [p.function_call for p in parts if p.function_call]
 
