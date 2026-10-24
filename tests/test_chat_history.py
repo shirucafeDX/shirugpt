@@ -258,3 +258,45 @@ with patch('app.history_store', side_effect=AssertionError('anonymous storage ac
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PaginatedHistoryTests(unittest.TestCase):
+    def test_more_adds_five_items_without_expander_and_reuses_opened_history(self):
+        source = UI_SOURCE.replace("store.list.return_value = [{'id': 'a'*32, 'title': '保存した質問', 'updated': datetime.now(timezone.utc), 'generation': 5}]", "store.list.return_value = [{'id': f'{i:032x}', 'title': f'履歴{i}', 'updated': datetime.now(timezone.utc), 'generation': 5} for i in range(13)]")
+        source = source.replace("st.write([m['text'] for m in st.session_state.messages])", "st.session_state['store_loads'] = st.session_state.get('store_loads', 0) + store.load.call_count")
+        app = AppTest.from_string(source).run(timeout=20)
+        self.assertFalse(app.exception)
+        self.assertEqual(len([b for b in app.button if b.key and b.key.startswith('open_history_')]), 5)
+        self.assertEqual(len(app.expander), 0)
+        app.button(key='history_more').click().run()
+        self.assertEqual(len([b for b in app.button if b.key and b.key.startswith('open_history_')]), 10)
+        app.button(key='history_more').click().run()
+        self.assertEqual(len([b for b in app.button if b.key and b.key.startswith('open_history_')]), 13)
+        self.assertNotIn('history_more', [b.key for b in app.button])
+        key = 'open_history_' + f'{10:032x}'
+        app.button(key=key).click().run()
+        self.assertFalse(app.exception)
+        before = app.session_state['store_loads']
+        app.button(key=key).click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state['store_loads'], before)
+
+    def test_identity_change_clears_cache(self):
+        source = '''
+from unittest.mock import Mock
+import streamlit as st
+from app import init_state, history_cache
+from src.config import load_settings
+s = load_settings()
+email = st.selectbox('user', ['a@example.com', 'b@example.com'])
+ctx = init_state(s, Mock(), Mock(), email)
+cache = history_cache(s, email)
+if st.button('seed'):
+    cache.remember('private', b'private', 1)
+st.session_state['keys'] = list(cache.payloads)
+'''
+        app = AppTest.from_string(source).run(timeout=20)
+        app.button[0].click().run()
+        self.assertTrue(app.session_state['keys'])
+        app.selectbox[0].select('b@example.com').run()
+        self.assertFalse(app.session_state['keys'])

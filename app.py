@@ -48,6 +48,7 @@ from src.config import (
 )
 from src.usage_log import UsageLogger, jst_month_bounds_utc
 from src.chat_history import HistoryStore, conversation_title, pack, unpack
+from src.history_cache import HistoryCache
 from google.api_core.exceptions import PreconditionFailed
 
 st.set_page_config(page_title="ShiruGPT", page_icon="📊", layout="wide")
@@ -212,6 +213,8 @@ def reset_conversation(
         active_turn.control.request_stop()
     if st.session_state.get("conversation_owner") != user_email:
         st.session_state.pop("history_entries", None)
+        st.session_state.pop("history_payload_cache", None)
+        st.session_state.pop("history_visible_count", None)
         st.session_state.history_list_error = ""
     # 会話を切り替えたとき、以前の図表ウィジェットの選択を持ち越さない。
     for key in list(st.session_state):
@@ -236,6 +239,16 @@ def history_store(bucket: str, project: str) -> HistoryStore:
     return HistoryStore(bucket, project)
 
 
+def history_cache(settings, user_email):
+    owner = (settings.gcp_project, settings.chat_history_bucket, user_email)
+    cache = st.session_state.get("history_payload_cache")
+    if cache is None or cache.owner != owner:
+        cache = HistoryCache(owner)
+        st.session_state.history_payload_cache = cache
+    return cache
+
+
+
 def save_conversation(ctx: ToolContext, status: str = "ready") -> None:
     if not ctx.user_email or not ctx.settings.chat_history_bucket:
         return
@@ -251,6 +264,7 @@ def save_conversation(ctx: ToolContext, status: str = "ready") -> None:
             st.session_state.history_generation,
         )
         st.session_state.history_generation = generation
+        history_cache(ctx.settings, ctx.user_email).remember(st.session_state.history_id, data, generation)
         st.session_state.history_dirty = False
         st.session_state.history_error = ""
         if is_new:
@@ -307,6 +321,8 @@ def render_history(settings, tools, usage_logger, user_email, ctx) -> None:
     if not entries:
         st.caption("保存された会話はありません。")
         return
+    cache = history_cache(settings, user_email)
+    cache.prefetch(store, user_email, entries[:5])
     dirty = st.session_state.history_dirty or st.session_state.get("active_turn") is not None
     # 履歴内だけを装飾する。標準ウィジェットのキーボード操作は維持する。
     st.markdown("""
@@ -333,6 +349,11 @@ def render_history(settings, tools, usage_logger, user_email, ctx) -> None:
 }
 .st-key-history_list [data-testid="stVerticalBlock"] { gap: .15rem; }
 .st-key-history_list [data-testid="stCaptionContainer"] { font-size: .75rem; }
+.st-key-history_more button {
+    border: none; background: transparent; box-shadow: none;
+    font-size: .8rem; opacity: .65; padding: .15rem .55rem; min-height: 1.6rem;
+}
+.st-key-history_more button:hover { opacity: 1; }
 .st-key-history_list [data-testid="stPopover"] button {
     border: none; background: transparent; padding: 0 .3rem;
     min-height: 1.6rem; box-shadow: none;
@@ -361,6 +382,7 @@ def render_history(settings, tools, usage_logger, user_email, ctx) -> None:
                     if delete:
                         try:
                             store.delete(user_email, selected, entry["generation"])
+                            cache.discard(selected)
                             st.session_state.history_entries = [e for e in entries if e["id"] != selected]
                             reset_conversation(settings, tools, usage_logger, user_email)
                             st.rerun()
@@ -371,15 +393,20 @@ def render_history(settings, tools, usage_logger, user_email, ctx) -> None:
                     open_conversation(settings, tools, usage_logger, user_email, store, selected)
 
     with st.container(key="history_list"):
-        render_entries(entries[:5])
-        if len(entries) > 5:
-            with st.expander(f"以前の履歴（{len(entries) - 5}件）"):
-                render_entries(entries[5:])
+        visible = st.session_state.get("history_visible_count", 5)
+        render_entries(entries[:visible])
+        if len(entries) > visible:
+            if st.button("さらに表示", key="history_more", disabled=running):
+                st.session_state.history_visible_count = visible + 5
+                st.rerun()
 
 
 def open_conversation(settings, tools, usage_logger, user_email, store, selected) -> None:
     try:
-        data, generation = store.load(user_email, selected)
+        entry = next((entry for entry in st.session_state.get("history_entries", []) if entry["id"] == selected), None)
+        data, generation = history_cache(settings, user_email).load(
+            store, user_email, selected, entry["generation"] if entry else None,
+        )
         new_ctx = _new_context(settings, tools, usage_logger, user_email)
         messages, contents, pending = unpack(data, new_ctx)
         reset_conversation(settings, tools, usage_logger, user_email)
