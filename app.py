@@ -890,12 +890,18 @@ def render_prompt_input(ctx: ToolContext) -> str | None:
     color = {"low": "#0d9488", "medium": "#3b82f6", "high": "#8b5cf6"}.get(getattr(ctx, "thinking_mode", "medium"), "#3b82f6")
     st.markdown("""
 <style>
-.st-key-prompt_input [data-testid="stChatInput"] {
-    border: 2px solid __COLOR__;
-    border-radius: 1rem;
-}
+.st-key-prompt_input [data-testid="stChatInput"],
 .st-key-prompt_input [data-testid="stChatInput"]:focus-within {
-    border-color: __COLOR__;
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+}
+.st-key-prompt_input [data-testid="stChatInput"] > div {
+    border: 2px solid __COLOR__ !important;
+    border-radius: .5rem;
+}
+.st-key-prompt_input [data-testid="stChatInput"]:focus-within > div {
+    border-color: __COLOR__ !important;
     box-shadow: 0 0 0 2px __COLOR__33;
 }
 </style>
