@@ -20,6 +20,7 @@ from google.genai import types
 from src.admin_page import render_admin_page
 from src.agent import (
     AnswerResult,
+    ClarificationResult,
     ConfirmationPending,
     GeminiAgent,
     ToolContext,
@@ -615,7 +616,7 @@ def render_sidebar(
 # ターン処理
 # --------------------------------------------------------------------
 def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
-    question = next((m["text"] for m in reversed(st.session_state.messages) if m["role"] == "user"), "")
+    question = next((m.get("question", m["text"]) for m in reversed(st.session_state.messages) if m["role"] == "user"), "")
     try:
         with st.status("質問に合う調べ方を考えています…", expanded=False) as status:
             result = agent.run(
@@ -624,7 +625,7 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
             )
         if isinstance(result, ConfirmationPending):
             st.session_state.pending = result
-        elif isinstance(result, AnswerResult):
+        elif isinstance(result, (AnswerResult, ClarificationResult)):
             st.session_state.pending = None
             st.session_state.messages.append(
                 {
@@ -633,6 +634,8 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
                     "question": question,
                     "runs": list(ctx.turn_runs),
                     "errors": list(ctx.turn_errors),
+                    **({"clarification": {"options": result.options, "answered": False}}
+                       if isinstance(result, ClarificationResult) else {}),
                 }
             )
         else:
@@ -666,6 +669,58 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
         )
     save_conversation(ctx)
     st.rerun()
+
+
+def submit_prompt(
+    prompt: str, agent: GeminiAgent, ctx: ToolContext, question: str | None = None,
+) -> None:
+    """通常の質問と確認への回答を、同じ記録・実行経路に送る。"""
+    message = {"role": "user", "text": prompt}
+    if question is not None:
+        message["question"] = question
+    st.session_state.messages.append(message)
+    st.session_state.contents.append(
+        types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
+    )
+    ctx.start_turn()
+    if ctx.usage_logger is not None:
+        ctx.usage_logger.log_prompt(
+            user_email=ctx.user_email,
+            session_id=ctx.session_id,
+            turn_id=ctx.turn_id,
+            prompt_text=prompt,
+        )
+    save_conversation(ctx, "running")
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    process_turn(agent, ctx)
+
+
+def render_clarification(
+    message: dict[str, Any], msg_idx: int, agent: GeminiAgent,
+    ctx: ToolContext, blocked: bool = False,
+) -> None:
+    with st.form(f"clarification_{ctx.session_id}_{msg_idx}"):
+        selected = st.radio(
+            "選択肢から回答", message["clarification"]["options"],
+            index=None, disabled=blocked,
+        )
+        free_text = st.text_area(
+            "自由記述・補足（選択せずに入力することもできます）", disabled=blocked,
+        )
+        submitted = st.form_submit_button("回答して続ける", type="primary", disabled=blocked)
+    if not submitted or blocked:
+        return
+    free_text = free_text.strip()
+    if not selected and not free_text:
+        st.warning("選択肢を選ぶか、自由記述を入力してください。")
+        return
+    answer = "\n".join(part for part in [selected, free_text] if part)
+    message["clarification"]["answered"] = True
+    submit_prompt(
+        f"確認への回答（{message['text']}）：\n{answer}", agent, ctx,
+        question=message.get("question", ""),
+    )
 
 
 def render_confirmation(
@@ -723,6 +778,13 @@ def render_chat_page(
     for msg_idx, message in enumerate(st.session_state.messages):
         render_message(message, msg_idx, shown)
 
+    last_message = st.session_state.messages[-1] if st.session_state.messages else {}
+    awaiting_clarification = bool(
+        last_message.get("clarification") and not last_message["clarification"].get("answered")
+    )
+    if awaiting_clarification:
+        render_clarification(last_message, len(st.session_state.messages) - 1, agent, ctx, blocked)
+
     pending = st.session_state.pending
     if pending is not None:
         # 確認待ちのターンは、開始時点で上限未満だったターンの続きなので、
@@ -737,7 +799,7 @@ def render_chat_page(
 
     prompt = st.chat_input(
         "質問してください（例: 〇〇店の参加率の推移をグラフで見せて）",
-        disabled=pending is not None or blocked,
+        disabled=pending is not None or blocked or awaiting_clarification,
     )
     if not prompt:
         if not st.session_state.messages and pending is None and not blocked:
@@ -746,22 +808,7 @@ def render_chat_page(
             )
         return
 
-    st.session_state.messages.append({"role": "user", "text": prompt})
-    st.session_state.contents.append(
-        types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
-    )
-    ctx.start_turn()
-    usage_logger.log_prompt(
-        user_email=user_email,
-        session_id=ctx.session_id,
-        turn_id=ctx.turn_id,
-        prompt_text=prompt,
-    )
-    save_conversation(ctx, "running")
-
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    process_turn(agent, ctx)
+    submit_prompt(prompt, agent, ctx)
 
 
 # --------------------------------------------------------------------

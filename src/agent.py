@@ -40,6 +40,13 @@ SYSTEM_INSTRUCTION = """あなたは BigQuery のデータ分析アシスタン�
 ユーザーの日本語の質問に対し、提供されたツールを使って BigQuery を調べ、日本語で回答します。
 
 ## 進め方
+0. 期間・対象店舗・指標など、回答を左右する条件が曖昧なら ask_clarification で
+   ユーザーに確認する。質問と選択肢はその都度、日本語で作る。
+   一度に確認するのは1項目とし、選びやすい2〜5個の選択肢を用意する。
+   自由記述欄は画面が付けるため、選択肢に「その他」「自由記述」を含めない。
+   確認が不要な明確な質問には、そのまま回答する。既に回答された条件を再確認しない。
+   実在する店舗・指標は必要に応じてツールで確認し、選択肢を捏造しない。
+   ask_clarification は単独で呼び、ユーザーの回答を待ってから分析を続ける。
 1. どのテーブルを見るか不明なときは list_datasets → list_tables でテーブル名を確認する。
 2. 使いそうなテーブルにだけ get_table_schema を呼び、列名と型を確認する。
    全テーブルのスキーマを片端から取得してはいけない。多くても 3〜4 テーブルに絞る。
@@ -119,6 +126,8 @@ def tool_progress(call: Any) -> str:
     if call.name == "run_query":
         purpose = str(args.get("purpose") or "").strip()
         return f"データを取得・集計しています：{purpose}" if purpose else "データを取得・集計しています…"
+    if call.name == "ask_clarification":
+        return "確認する質問と選択肢を用意しています…"
     return "調査に必要な情報を確認しています…"
 
 
@@ -179,6 +188,12 @@ class AnswerResult:
 
 
 @dataclass
+class ClarificationResult:
+    text: str
+    options: list[str]
+
+
+@dataclass
 class ConfirmationPending:
     key: str
     sql: str
@@ -196,6 +211,23 @@ class _Pending(Exception):
 
 def build_declarations() -> list[types.FunctionDeclaration]:
     return [
+        types.FunctionDeclaration(
+            name="ask_clarification",
+            description="分析に必要な条件をユーザーに確認し、回答を待つ。単独で呼ぶ。自由記述欄は画面側が付ける。",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "question": types.Schema(type=types.Type.STRING, description="確認したい1項目の具体的な質問（日本語）"),
+                    "options": types.Schema(
+                        type=types.Type.ARRAY,
+                        items=types.Schema(type=types.Type.STRING),
+                        description="回答の選択肢2〜5個。その他・自由記述は含めない。",
+                        min_items=2, max_items=5,
+                    ),
+                },
+                required=["question", "options"],
+            ),
+        ),
         types.FunctionDeclaration(
             name="list_datasets",
             description=(
@@ -309,6 +341,19 @@ class GeminiAgent:
     def _call_tool(
         self, name: str, args: dict[str, Any], ctx: ToolContext
     ) -> dict[str, Any]:
+        if name == "ask_clarification":
+            question = args.get("question")
+            options = args.get("options")
+            if not isinstance(question, str) or not question.strip():
+                raise BQToolError("question に確認したい質問を指定してください。")
+            if (not isinstance(options, list) or not 2 <= len(options) <= 5
+                    or any(not isinstance(option, str) or not option.strip() for option in options)):
+                raise BQToolError("options に空でない選択肢を2〜5個指定してください。")
+            options = [option.strip() for option in options]
+            if len(set(options)) != len(options):
+                raise BQToolError("options の選択肢は重複しないようにしてください。")
+            return {"status": "awaiting_user", "question": question.strip(), "options": options}
+
         if name == "list_datasets":
             if "datasets" not in ctx.listing_cache:
                 ctx.listing_cache["datasets"] = ctx.tools.list_datasets()
@@ -499,7 +544,7 @@ class GeminiAgent:
     def run(
         self, contents: list[types.Content], ctx: ToolContext,
         on_progress: Callable[[str], None] | None = None,
-    ) -> AnswerResult | ConfirmationPending:
+    ) -> AnswerResult | ConfirmationPending | ClarificationResult:
         """1 ターンを最後まで進める。確認が必要な場合は中断して状態を残す。
 
         contents は破壊的に更新される（Gemini の応答とツール結果を追記）。
@@ -602,10 +647,22 @@ class GeminiAgent:
 
             try:
                 responses = []
+                # 確認質問と同時に要求されたデータ取得は、回答が来るまで実行しない。
+                clarification_call = next((call for call in pending_calls if call.name == "ask_clarification"), None)
+                clarification = None
                 for call in pending_calls:
+                    if clarification_call is not None and call is not clarification_call:
+                        responses.append(types.Part.from_function_response(
+                            name=call.name, response={"error": "ユーザーへの確認を優先したため未実行です。回答後に必要なら再度呼んでください。"},
+                        ))
+                        continue
                     if on_progress is not None:
                         on_progress(tool_progress(call))
-                    responses.append(self._dispatch(call, ctx))
+                    tool_response = self._dispatch(call, ctx)
+                    responses.append(tool_response)
+                    payload = tool_response.function_response.response
+                    if call.name == "ask_clarification" and payload.get("status") == "awaiting_user":
+                        clarification = ClarificationResult(payload["question"], payload["options"])
             except _Pending as pending:
                 # ここで中断。承認後に同じ pending_calls から再開する。
                 ctx.resume_calls = pending_calls
@@ -618,6 +675,10 @@ class GeminiAgent:
                 )
 
             contents.append(types.Content(role="user", parts=responses))
+            if clarification is not None:
+                # ツール呼出への応答を完結させ、次のユーザー回答を通常の会話として受ける。
+                self._answer(contents, clarification.text + "\n" + "\n".join(f"- {option}" for option in clarification.options))
+                return clarification
             processed_tools = True
             pending_calls = None
 
