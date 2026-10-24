@@ -572,10 +572,11 @@ def render_sidebar(
     monthly_limit_usd: float,
 ) -> None:
     with st.sidebar:
-        if user_email:
-            st.write(f"ログイン中: {user_email}")
-            if st.button("ログアウト", width="stretch"):
-                st.logout()
+        if st.button("新しいチャット", width="stretch", disabled=st.session_state.history_dirty):
+            reset_conversation(settings, tools, usage_logger, user_email)
+            st.rerun()
+
+        render_history(settings, tools, usage_logger, user_email, ctx)
 
         if user_email and settings.logging_enabled and monthly_used_usd is not None:
             st.divider()
@@ -595,15 +596,15 @@ def render_sidebar(
             # st.caption("上限の引き上げは店長提案の承認後、DXにお問い合わせください。")
 
         st.divider()
-        if st.button("新しいチャット", width="stretch", disabled=st.session_state.history_dirty):
-            reset_conversation(settings, tools, usage_logger, user_email)
-            st.rerun()
-
-        render_history(settings, tools, usage_logger, user_email, ctx)
-
         st.link_button(
             "📝 質問・報告フォーム", FEEDBACK_FORM_URL, width="stretch"
         )
+
+        if user_email:
+            st.divider()
+            st.write(f"ログイン中: {user_email}")
+            if st.button("ログアウト", width="stretch"):
+                st.logout()
 
 
 # --------------------------------------------------------------------
