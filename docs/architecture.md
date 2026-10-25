@@ -114,7 +114,7 @@ Gemini は BigQuery に直接触れません。**Gemini がするのは「この
 | 9 | sql_guard | SELECT 限定・allowlist・複文を検査。`LIMIT 1000` を自動付与 |
 | 10 | bq_tools | dry run で 9.58 MB と見積もり → 閾値内なので実行 |
 | 11 | summarize | 結果 13 行を「行数・列と型・統計・先頭 15 行」に圧縮 |
-| 12 | Gemini | 要約を読んで日本語の回答文を生成（ツール要求なし＝ループ終了） |
+| 12 | Gemini | 結果を読んで`finish_answer`で日本語の回答と引き継ぎメモを返す（生成は追加せず終了） |
 | 13 | app.py | 回答・実行 SQL・グラフ・表を画面に描画 |
 
 ツールの呼び出しは **4 回**（ステップ 3, 5, 7, 10）、Gemini への生成リクエストは
@@ -128,12 +128,13 @@ Gemini は「答えるために何が必要か」を 1 回では判断しきれ�
 書かせれば、存在しない列名を推測で使うことになります。
 
 そこで「調べる → 分かったことを踏まえて次を決める」を繰り返させます。
-ループの終了条件は **Gemini の応答に `function_call` が 1 つも含まれなくなること**です。
+ループは通常、**`finish_answer`が有効な回答とメモを返した時**に終了します。
+ツールを使わない通常のテキスト回答も受け付けますが、その場合は要約への置換を行いません。
 
 ```python
 # src/agent.py: run()
 for _ in range(self.settings.max_tool_iterations):   # 暴走防止の上限（既定 50）
-    response = self._generate(contents)
+    response = self._generate(context_memory.build_request(contents, ctx))
     calls = [p.function_call for p in parts if p.function_call]
 
     if not calls:
@@ -142,7 +143,8 @@ for _ in range(self.settings.max_tool_iterations):   # 暴走防止の上限（�
     contents.append(candidate.content)     # Gemini の「呼びたい」を履歴に追記
     responses = [self._dispatch(call, ctx) for call in calls]
     contents.append(Content(role="user", parts=responses))   # 結果を履歴に追記
-    # ループ先頭へ戻り、増えた履歴で再度 Gemini に問う
+    # finish_answerが成功した場合は回答を表示して終了（追加の生成なし）
+    # それ以外は送信用の履歴を組み立て直し、ループ先頭へ戻る
 ```
 
 `max_tool_iterations` は、スキーマ取得と SQL 修正を延々と往復するような
@@ -214,8 +216,9 @@ Gemini が受け取るのは次のような構造です。統計情報と先頭�
 
 元テーブルは 838,286 行ありますが、Gemini が見るのは集計後のこの構造だけです。
 
-`SAMPLE_ROWS` の既定値は500行です。**一度返したツール結果は `contents` に
-残り続ける**ため、会話が進むほど過去のサンプル行も毎回のプロンプトに含まれます。
+`SAMPLE_ROWS` の既定値は500行です。一度返したツール結果は原本の`contents`に
+残しますが、送信用の会話は別に組み立てます。モデルが読み終えた大きな結果はメモに置換し、
+完了したターンは直近2件の要点と、それ以前の累積要約にまとめます。メモのない結果・ターンは保持します。
 増やすと確認できる行が増える一方、入力トークンや応答時間が増える可能性があります。
 先頭から取得するため、並び順による偏りも残ります。統計情報は取得した結果が対象で、
 切り捨てられた元データ全体を表すものではありません。
@@ -321,7 +324,7 @@ agent.run() を再度呼ぶ
 全件は折りたたみ欄で確認できます。
 
 処理中の表示は一覧・列情報の確認、データ取得・集計に合わせて切り替えます。
-ツール実行後は直前の進捗を維持し、「回答を作成しています」への切り替えは行いません。
+ツール実行後は直前の進捗を維持し、`finish_answer`が返った時に「回答を作成しています」と表示します。
 取得・集計中は Gemini が作成した `purpose` を表示し、実行詳細にも同じ説明を使います。
 
 処理中は丸の中に四角のある停止ボタンを表示します。ターンはバックグラウンドで実行し、
@@ -407,3 +410,5 @@ Gemini には技術的詳細を渡します。エラー内容が分からない�
 
   実データ検証で踏んだ落とし穴で、`agent.SYSTEM_INSTRUCTION` に明示的な指示として
   入れてあります。
+
+入力トークンを減らすためのメモ・階層要約・詳細参照は、[設計と制約](context-budget-proposal.md)を参照してください。

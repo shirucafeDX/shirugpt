@@ -35,6 +35,7 @@ from .thinking import DEEP_ANALYSIS_INSTRUCTION
 from .sql_guard import SQLGuardError
 from .usage_log import UsageLogger
 from .execution import ExecutionControl, ExecutionStopped
+from . import context_memory
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,31 @@ run_query が error を返したら、内容を読んで SQL を修正し、最�
 """
 
 
+SYSTEM_INSTRUCTION += """
+
+## 会話の引き継ぎ
+- 結果を読んで次のツールを選ぶ際、その呼び出しのcontext_noteに判明した要点を添える。
+  summaryには確定した事実・条件（対象・期間・指標の定義・単位・数値・除外条件）を箇条書きで1200文字以内に記す。
+  未確認事項や「〜を確認する必要がある」といったTODOはsummaryに書かず、open_questionsに分離する。
+  referencesには実際に読み終えた結果のresult_idだけを指定する。まだ受け取っていない結果を参照しない。
+  メモは他の結果も読む次回の自分への事実の引き継ぎであり、思考過程を書く欄ではない。
+- 最終回答はfinish_answerで返す。answerはユーザー向けの日本語、context_noteは今回の要点、
+  conversation_summaryは今回までの会話全体の目的・合意した条件・主要な事実を4000文字以内にまとめる。
+  未確認事項・過去の確認待ち・解決済みの疑問は累積要約に混ぜない。未確認事項は常に別の最新一覧を参照する。
+  SQLや大量の明細をメモに転載せず、検証に必要なresult_idを残す。
+- 過去の要約はモデルの解釈であり原データではない。省略された数値・条件を推測しない。
+  必要な時はrecall_contextで保存済み結果の必要な列・行を確認する。SQLは必要な時だけinclude_sql=trueで取得する。
+  turn_idやキーワード検索から過去の結果IDも探せる。これは会話内の保存結果の取得で、新しいBigQuery照会ではない。
+- 未確認事項はcontext_note.open_questionsに{id,question}の箇条書き相当の配列で追加・更新する。
+  同じ疑問には同じidを使い、既存の事項を毎回転載する必要はない。変更がなければ空配列にする（既存事項は保持される）。
+  根拠となる結果やユーザーの回答から解決したらresolved_questionsに{id,conclusion}を入れて閉じ、結論を事実として残す。
+  新しい結果を読むたびに、登録中の疑問が解決したかを確認する。解決した疑問を別idで再登録しない。
+  リクエスト末尾のopen_questionsが現在の全件一覧。過去の呼び出し・メモ・原本にある疑問は歴史的な記録であり、
+  最新一覧にない事項を未解決として扱わない。解決判定はあなたが行い、アプリはその更新を一覧に反映する。
+- finish_answerとask_clarificationはそれぞれ単独で呼ぶ。
+"""
+
+
 def _sql_key(sql: str) -> str:
     return hashlib.sha256(sql.strip().encode("utf-8")).hexdigest()
 
@@ -192,6 +218,10 @@ def tool_progress(call: Any) -> str:
         return f"データを取得・集計しています：{purpose}" if purpose else "データを取得・集計しています…"
     if call.name == "ask_clarification":
         return "確認する質問と選択肢を用意しています…"
+    if call.name == "recall_context":
+        return "この会話の取得済みデータを確認しています…"
+    if call.name == "finish_answer":
+        return "回答を作成しています…"
     return "調査に必要な情報を確認しています…"
 
 
@@ -204,6 +234,7 @@ class ToolContext:
     schema_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
     listing_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
     query_cache: dict[str, QueryRun] = field(default_factory=dict)
+    context_state: dict[str, Any] = field(default_factory=dict)
     decisions: dict[str, str] = field(default_factory=dict)
     resume_calls: list[Any] | None = None
     execution_control: ExecutionControl | None = None
@@ -289,7 +320,7 @@ class _Pending(Exception):
 
 
 def build_declarations() -> list[types.FunctionDeclaration]:
-    return [
+    declarations = [
         types.FunctionDeclaration(
             name="ask_clarification",
             description=(
@@ -408,6 +439,46 @@ def build_declarations() -> list[types.FunctionDeclaration]:
         ),
     ]
 
+    declarations.extend([
+        types.FunctionDeclaration(
+            name="finish_answer", description="最終回答と引き継ぎメモを同時に返して終了する。単独で呼ぶ。",
+            parameters=types.Schema(type=types.Type.OBJECT, properties={
+                "answer": types.Schema(type=types.Type.STRING, description="ユーザーに表示する回答"),
+                "conversation_summary": types.Schema(type=types.Type.STRING, description="今回までの確定した事実・合意した条件。未確認事項は混ぜない。4000文字以内"),
+            }, required=["answer", "conversation_summary", "context_note"])),
+        types.FunctionDeclaration(
+            name="recall_context", description="この会話の保存済み原結果を参照。result_id、turn_id、searchのどれか1つを指定。再問い合わせしない。",
+            parameters=types.Schema(type=types.Type.OBJECT, properties={
+                "result_id": types.Schema(type=types.Type.STRING),
+                "turn_id": types.Schema(type=types.Type.STRING),
+                "search": types.Schema(type=types.Type.STRING, description="過去の質問・要点を探すキーワード"),
+                "columns": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING)),
+                "offset": types.Schema(type=types.Type.INTEGER, description="開始行。既定0"),
+                "limit": types.Schema(type=types.Type.INTEGER, description="取得行数。既定20、最大100"),
+                "include_sql": types.Schema(type=types.Type.BOOLEAN, description="SQLも必要な場合のみtrue"),
+            })),
+    ])
+    for declaration in declarations:
+        declaration.parameters.properties["context_note"] = types.Schema(
+            type=types.Type.OBJECT, description="これまでに読んだ結果の要点。要約用の別API呼び出しは不要。",
+            properties={
+                "summary": types.Schema(type=types.Type.STRING, description="確定した事実・条件の箇条書き。未確認事項は混ぜない。1200文字以内"),
+                "references": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING), description="読み終えたresult_id。最大12件"),
+                "open_questions": types.Schema(type=types.Type.ARRAY, max_items=12,
+                    description="未確認事項をID付きで追加・更新。未変更なら空配列。解決済みIDの再利用は禁止。",
+                    items=types.Schema(type=types.Type.OBJECT, properties={
+                        "id": types.Schema(type=types.Type.STRING, description="英字で始まる40文字以内の英数字・ハイフン・アンダースコア"),
+                        "question": types.Schema(type=types.Type.STRING, description="未確認の具体的な事項。300文字以内"),
+                    }, required=["id", "question"])),
+                "resolved_questions": types.Schema(type=types.Type.ARRAY, max_items=12,
+                    description="登録済み事項の解決。根拠を確認してIDと結論を指定。変更なしなら空配列。",
+                    items=types.Schema(type=types.Type.OBJECT, properties={
+                        "id": types.Schema(type=types.Type.STRING),
+                        "conclusion": types.Schema(type=types.Type.STRING, description="確認した結論と根拠。600文字以内"),
+                    }, required=["id", "conclusion"])),
+            }, required=["summary", "references", "open_questions", "resolved_questions"])
+    return declarations
+
 
 class GeminiAgent:
     def __init__(self, settings: Settings, client: genai.Client | None = None,
@@ -490,6 +561,24 @@ class GeminiAgent:
     def _call_tool(
         self, name: str, args: dict[str, Any], ctx: ToolContext
     ) -> dict[str, Any]:
+        if name == "recall_context":
+            try:
+                return context_memory.recall(ctx, args)
+            except ValueError as exc:
+                raise BQToolError(str(exc)) from exc
+        if name == "finish_answer":
+            answer, overview = args.get("answer"), args.get("conversation_summary")
+            note = args.get("context_note")
+            if not isinstance(answer, str) or not answer.strip():
+                raise BQToolError("answerには空でない最終回答を指定してください。")
+            if not isinstance(overview, str) or not overview.strip() or len(overview) > context_memory.OVERVIEW_CHARS:
+                raise BQToolError("conversation_summaryには4000文字以内で会話全体の要点を指定してください。")
+            warning = context_memory.validate_note(ctx, note)
+            if warning or note is None:
+                raise BQToolError(warning or "context_noteを指定してください。")
+            return {"status": "final_answer", "answer": answer.strip(),
+                    "summary": context_memory.factual_summary(note), "overview": overview.strip()}
+
         if name == "ask_clarification":
             scope = args.get("scope", "data")
             if scope not in ("data", "general"):
@@ -654,7 +743,15 @@ class GeminiAgent:
                     error_text=technical_detail(exc, limit=10_000),
                 )
 
-        return types.Part.from_function_response(name=name, response=payload)
+        if not payload.get("error"):
+            warning = context_memory.accept_note(ctx, args.get("context_note"))
+            if warning:
+                payload = {**payload, "context_note_warning": warning}
+            if name != "finish_answer":
+                payload = context_memory.register_result(ctx, name, args, payload)
+        part = types.Part.from_function_response(name=name, response=payload)
+        part.function_response.id = getattr(call, "id", None)
+        return part
 
     @staticmethod
     def _error_report(
@@ -670,12 +767,14 @@ class GeminiAgent:
 
     @staticmethod
     def _answer(contents: list[types.Content], text: str,
-                content: types.Content | None = None) -> AnswerResult:
+                content: types.Content | None = None, ctx: ToolContext | None = None) -> AnswerResult:
         # UI だけでなく、次の API 呼び出しにも最終回答を引き継ぐ。
         # 元の Content を使うことで thought signature も保持する。
         contents.append(content if content is not None else types.Content(
             role="model", parts=[types.Part.from_text(text=text)]
         ))
+        if ctx is not None:
+            context_memory.finish_turn(contents, ctx)
         return AnswerResult(text)
 
     @staticmethod
@@ -726,6 +825,7 @@ class GeminiAgent:
             turn_agent = GeminiAgent(self.settings, client=self.client,
                                      thinking_level=ctx.active_thinking_level, deep_analysis=ctx.thinking_enabled)
             return turn_agent.run(contents, ctx, on_progress=on_progress)
+        context_memory.sync_turns(contents, ctx)
         pending_calls = ctx.resume_calls
         ctx.resume_calls = None
         processed_tools = False
@@ -737,7 +837,7 @@ class GeminiAgent:
                 if on_progress is not None and not processed_tools and not ctx.turn_runs:
                     on_progress("質問に合う調べ方を考えています…")
                 try:
-                    response = self._generate(contents)
+                    response = self._generate(context_memory.build_request(contents, ctx))
                 except Exception as exc:  # noqa: BLE001 - 記録してから同じ例外を上に伝える
                     if ctx.execution_control is not None:
                         ctx.execution_control.check()
@@ -765,7 +865,7 @@ class GeminiAgent:
                         if source == "output_limit" else
                         "モデルから有効な応答が得られませんでした。質問を言い換えてお試しください。"
                     )
-                    return self._answer(contents, message)
+                    return self._answer(contents, message, ctx=ctx)
 
                 parts = candidate.content.parts or []
                 calls = [p.function_call for p in parts if p.function_call]
@@ -780,20 +880,20 @@ class GeminiAgent:
                         content = candidate.content.model_copy(update={
                             "parts": [*[p for p in parts if not p.function_call], types.Part.from_text(text="出力トークン上限に達したため、回答は途中で打ち切られています。")]
                         })
-                        return self._answer(contents, message, content)
+                        return self._answer(contents, message, content, ctx=ctx)
                     message = (
                         "出力トークン上限に達して回答が打ち切られました。質問をもう少し絞ってお試しください。"
                         if reason == "MAX_TOKENS" else
                         "モデルの応答を正常に受け取れませんでした。質問を言い換えてお試しください。"
                     )
-                    return self._answer(contents, message)
+                    return self._answer(contents, message, ctx=ctx)
 
                 if not calls:
                     if not text:
                         self._record_generation_issue(ctx, "empty_response", "text も function_call も返りませんでした。", response, reason)
                     return self._answer(
                         contents, text or "回答を生成できませんでした。質問を言い換えてお試しください。",
-                        candidate.content if text else None,
+                        candidate.content if text else None, ctx=ctx,
                     )
 
                 contents.append(candidate.content)
@@ -803,14 +903,23 @@ class GeminiAgent:
                 responses = []
                 # 確認質問と同時に要求されたデータ取得は、回答が来るまで実行しない。
                 clarification_call = next((call for call in pending_calls if call.name == "ask_clarification"), None)
+                final_call = next((call for call in pending_calls if call.name == "finish_answer"), None)
+                final_payload = None
                 clarification = None
                 for call in pending_calls:
                     if ctx.execution_control is not None:
                         ctx.execution_control.check()
                     if clarification_call is not None and call is not clarification_call:
-                        responses.append(types.Part.from_function_response(
+                        skipped = types.Part.from_function_response(
                             name=call.name, response={"error": "ユーザーへの確認を優先したため未実行です。回答後に必要なら再度呼んでください。"},
-                        ))
+                        )
+                        skipped.function_response.id = getattr(call, "id", None)
+                        responses.append(skipped)
+                        continue
+                    if clarification_call is None and final_call is not None and call is not final_call:
+                        skipped = types.Part.from_function_response(name=call.name, response={"error": "最終回答を優先したため未実行です。"})
+                        skipped.function_response.id = getattr(call, "id", None)
+                        responses.append(skipped)
                         continue
                     if on_progress is not None:
                         on_progress(tool_progress(call))
@@ -819,6 +928,8 @@ class GeminiAgent:
                     if ctx.execution_control is not None:
                         ctx.execution_control.check()
                     payload = tool_response.function_response.response
+                    if call.name == "finish_answer" and payload.get("status") == "final_answer":
+                        final_payload = payload
                     if call.name == "ask_clarification" and payload.get("status") == "awaiting_user":
                         clarification = ClarificationResult(
                             payload["question"], payload["options"], payload["selection_mode"],
@@ -835,10 +946,14 @@ class GeminiAgent:
                 )
 
             contents.append(types.Content(role="user", parts=responses))
+            if final_payload is not None:
+                result = self._answer(contents, final_payload["answer"], ctx=ctx)
+                context_memory.finish_turn(contents, ctx, final_payload["summary"], final_payload["overview"])
+                return result
             if clarification is not None:
                 # ツール呼出への応答を完結させ、次のユーザー回答を通常の会話として受ける。
                 mode_label = "複数選択可" if clarification.selection_mode == "multi" else "1つ選択"
-                self._answer(contents, clarification.text + f"\n（{mode_label}・自由記述可）\n" + "\n".join(f"- {option}" for option in clarification.options))
+                self._answer(contents, clarification.text + f"\n（{mode_label}・自由記述可）\n" + "\n".join(f"- {option}" for option in clarification.options), ctx=ctx)
                 return clarification
             processed_tools = True
             pending_calls = None
@@ -850,5 +965,5 @@ class GeminiAgent:
         )
         return self._answer(contents,
             "調査の手順が想定より多くなったため、途中で打ち切りました。"
-            "質問をもう少し具体的にしていただけますか。"
+            "質問をもう少し具体的にしていただけますか。", ctx=ctx
         )

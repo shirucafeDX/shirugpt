@@ -19,7 +19,7 @@ from .bq_tools import QueryRun
 
 # 実行時オブジェクト、認証情報、月次利用量のベースラインは保存しない。
 CONTEXT_FIELDS = (
-    'schema_cache', 'listing_cache', 'query_cache', 'decisions', 'resume_calls',
+    'context_state', 'schema_cache', 'listing_cache', 'query_cache', 'decisions', 'resume_calls',
     'turn_runs', 'turn_errors', 'turn_prompt_tokens', 'turn_output_tokens',
     'turn_thinking_tokens', 'turn_total_tokens', 'session_prompt_tokens',
     'session_output_tokens', 'session_total_tokens', 'session_billed_bytes',
@@ -117,6 +117,7 @@ def unpack(data, ctx):
         for key in CONTEXT_FIELDS:
             if key in context:
                 setattr(ctx, key, context[key])
+        ctx.context_state = context.get('context_state', {})
         ctx.thinking_enabled = context.get('thinking_enabled') is True
         previous = context.get('thinking_previous_effort', 'medium')
         ctx.thinking_previous_effort = previous if previous in ('low', 'medium', 'high') else 'medium'
@@ -133,6 +134,7 @@ def unpack(data, ctx):
                 messages.append({'role': 'assistant', 'text': 'モデルが変更されたため、以前の実行確認は解除しました。必要に応じて、もう一度質問してください。'})
             pending = None
             ctx.resume_calls = None
+            ctx.context_state = {}
         if ctx.thinking_mode not in ('low', 'medium', 'high'):
             ctx.thinking_mode = 'medium'
         if ctx.active_thinking_level not in ('low', 'medium', 'high'):
