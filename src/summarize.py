@@ -96,10 +96,11 @@ def summarize_dataframe(
             numeric = pd.to_numeric(series, errors="coerce").dropna()
             if not numeric.empty:
                 info["stats"] = {
-                    "min": _jsonable(float(numeric.min())),
-                    "max": _jsonable(float(numeric.max())),
+                    "min": _jsonable(numeric.min()),
+                    "max": _jsonable(numeric.max()),
                     "mean": _jsonable(float(numeric.mean())),
-                    "sum": _jsonable(float(numeric.sum())),
+                    "sum": (sum(map(int, numeric)) if pd.api.types.is_integer_dtype(numeric)
+                            else _jsonable(numeric.sum())),
                 }
         elif pd.api.types.is_datetime64_any_dtype(series):
             valid = series.dropna()
@@ -109,12 +110,17 @@ def summarize_dataframe(
                     "max": _jsonable(valid.max()),
                 }
         else:
-            nunique = int(series.nunique(dropna=True))
-            info["distinct_count"] = nunique
-            if nunique <= 10:
-                info["distinct_values"] = [
-                    _jsonable(v) for v in series.dropna().unique()[:10]
-                ]
+            try:
+                nunique = int(series.nunique(dropna=True))
+            except TypeError:
+                # ARRAY / STRUCTはハッシュ化できない。行データは別途CSVで保持する。
+                info["distinct_count_unavailable"] = True
+            else:
+                info["distinct_count"] = nunique
+                if nunique <= 10:
+                    info["distinct_values"] = [
+                        _jsonable(v) for v in series.dropna().unique()[:10]
+                    ]
         columns.append(info)
 
     summary["columns"] = columns
@@ -123,8 +129,8 @@ def summarize_dataframe(
 
     head = df.head(sample_rows)
     summary["sample_rows"] = [
-        {str(col): _jsonable(row[col]) for col in head.columns}
-        for _, row in head.iterrows()
+        {str(col): _jsonable(value) for col, value in row.items()}
+        for row in head.to_dict(orient="records")
     ]
     summary["sample_row_count"] = int(len(head))
 
