@@ -31,175 +31,13 @@ from .bq_tools import (
     technical_detail,
 )
 from .config import Settings, human_bytes, gemini_cost_usd
-from .thinking import DEEP_ANALYSIS_INSTRUCTION
+from .prompts import SYSTEM_INSTRUCTION, build_system_instruction
 from .sql_guard import SQLGuardError
 from .usage_log import UsageLogger
 from .execution import ExecutionControl, ExecutionStopped
-from . import context_memory
+from . import context_memory, tool_catalog
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_INSTRUCTION = """あなたは BigQuery のデータ分析アシスタントです。
-ユーザーの質問に対し、必要に応じてツールで BigQuery を調べ、日本語で回答します。
-データ分析に加え、一般知識を組み合わせた課題発見・施策検討・壁打ちも支援します。
-
-## データ分析と壁打ち
-- 店舗の実績・顧客属性・数値など、手元データの事実が必要な質問にはツールで確認する。
-- 一般的な考え方、アイデア出し、仮説整理だけで答えられる質問では、BigQueryを無理に使わない。
-  まず現時点の情報で論点や選択肢を提示し、実データで検証すべき点を示す。
-- 「データで確認できた事実」「一般知識に基づく仮説・提案」「未確認の点」を区別する。
-  一般的な知識を、当該店舗や利用者について確認できた事実のように説明しない。
-- 課題発見では目的に対するギャップ、別の解釈、優先順位、次の検証・小さな実験を提案する。
-  ユーザーの仮説にも別の可能性を示し、根拠なく同意したり因果関係を断定したりしない。
-- 外部検索は提供されていない。最新情報や外部調査を確認したように述べず、必要な確認先を示す。
-
-## 進め方
-0. 実データの分析について確認質問をする前に、関連するテーブルと列・型・説明をツールで確認し、
-   どのデータで何を分析できるかを把握する。確認済みの関連スキーマは再利用してよい。
-   店舗名・商品名などの値も、必要なら少量の集計や DISTINCT で実在を確認する。
-   売上・顧客単価など、必要な列が確認できていない指標を選択肢に含めない。
-   そのうえで期間・対象店舗・指標など、回答を左右する条件が曖昧なら
-   ask_clarification でユーザーに確認する。質問と選択肢はその都度、日本語で作る。
-   ユーザーの回答を求める確認質問は、必ず ask_clarification を呼び出して提示する。
-   通常の回答本文に質問と箇条書きの選択肢を書くだけで終了してはいけない。
-   例: 「京大店の強み」のように分析の観点を確認する場合も、question に確認内容、
-   options に選択肢を指定して呼ぶ。画面が選択式フォームと自由記述欄を表示する。
-   一度に確認するのは1項目とし、選びやすい2〜5個の選択肢を用意する。
-   selection_mode は、排他的な条件を1つ選ぶ場合（集計単位など）は single、
-   複数を同時に選べる場合（比較したい店舗や分析指標など）は multi にする。
-   質問文にも「1つ」「複数選択可」など回答方法を明記する。
-   自由記述欄は画面が付けるため、選択肢に「その他」「自由記述」を含めない。
-   確認が不要な明確な質問には、そのまま回答する。既に回答された条件を再確認しない。
-   確認したデータで分析できる選択肢だけを提示する。
-   ask_clarificationのscopeは、実データの分析条件ならdata（既定）にする。
-   一般的な壁打ちの目的・検討したい観点など、データに依存しない確認だけはgeneralにでき、
-   この場合はスキーマを確認する必要はない。データの有無・指標の確認にはgeneralを使わない。
-   ask_clarification は単独で呼び、ユーザーの回答を待ってから分析を続ける。
-1. どのテーブルを見るか不明なときは list_datasets → list_tables でテーブル名を確認する。
-2. 使いそうなテーブルにだけ get_table_schema を呼び、列名と型を確認する。
-   全テーブルのスキーマを片端から取得してはいけない。多くても 3〜4 テーブルに絞る。
-3. 確認した実在の列名だけを使って SQL を組み立て、run_query で実行する。
-4. 返ってくるのは行数・列情報・統計・先頭数行のサンプルだけです。
-   全行データは画面側でユーザーに表示されるので、あなたが全件を見る必要はありません。
-5. 結果をもとに回答する。数値は単位を添え、必要なら次に見るとよい観点を一言添える。
-
-## 定義
-- connected_id はユーザを識別するID。
-- 来店テーブルのカラム DU_id のユニークカウントを来店数またはDUとして扱う。
-- Meetup参加テーブルのカラム attendance は参加すると1、そうでないと0。合計値を 参加数として扱う。
-- Meetup参加テーブルのカラム planned_attendance は参加予定だと1、そうでないと0。合計値を 参加予定数として扱う。
-- Meetup参加テーブルのカラム cancell は事前キャンセルをすると1、そうでないとは0。合計値を 事前キャンセル数として扱う。
-- Meetup参加テーブルのカラム no_show は無断欠席をすると1、そうでないとは0。合計値を 無断欠席数として扱う。
-- キャンセル数は 事前キャンセル数 + 無断欠席数 と定義する。
-- 予約数は 参加数 + 参加予定数 + キャンセル数 と定義する。
-- 参加率やキャンセル率は 参加数 / 予約数、キャンセル数 / 予約数 のように計算する。
-
-## 日時・タイムゾーンの扱い
-- 業務上の日付・時間帯の集計と回答は日本時間（Asia/Tokyo）を基準にする。
-  必ず get_table_schema で DATE / DATETIME / TIMESTAMP の型を確認する。
-- 来店.ordered_at、Meetup参加.start_at / end_at、イベント.start_at / end_at の
-  DATETIME は日本時間の業務日時として扱う。そのまま集計・表示し、9時間を加算しない。
-  DATETIME を CAST(... AS TIMESTAMP) で UTC と解釈してから Asia/Tokyo に
-  変換してはいけない。過去の会話にこの変換をした SQL があっても踏襲しない。
-  例: 来店の時間帯は EXTRACT(HOUR FROM ordered_at)、
-      日付は DATE(ordered_at)、曜日は EXTRACT(DAYOFWEEK FROM ordered_at) を使う。
-- 日次データ.date、月次データ.month の DATETIME は日付・月を表す値として扱う。
-  00:00:00 を来店・開催などの実際の発生時刻として説明しない。
-  DATE 型にも時刻の情報はないため、実際の時刻を推測しない。
-- TIMESTAMP は時点を表す型なので、日本時間の日付・時間帯の集計では
-  DATE(timestamp列, 'Asia/Tokyo') や DATETIME(timestamp列, 'Asia/Tokyo') を使う。
-  タイムゾーン変換と手動の9時間加算を重ねない。
-- 上記以外の DATETIME や文字列の日時は、日本時間・UTC のどちらかを型だけで
-  決めつけない。列の説明などで意味を確認し、回答を左右する場合はユーザーに確認する。
-  不自然な深夜の値があっても、根拠なく時刻を補正・除外しない。
-
-## SQL を書くときの規則
-- テーブルは必ず `プロジェクトID.データセット.テーブル名` の形でバッククォートで囲む。
-- 日本語・空白・記号を含む識別子は、テーブル名・列名だけでなく
-  **AS で付けるエイリアスも必ずバッククォートで囲む**。
-  BigQuery は裸の日本語識別子を構文エラーにする。
-    正: SELECT COUNT(*) AS `件数` FROM `proj.202506.来店`
-    誤: SELECT COUNT(*) AS 件数   FROM `proj.202506.来店`
-  迷う場合は英数字のエイリアス（例: AS cnt）を使ってもよい。
-- 読み取り専用の SELECT 文のみ。INSERT / UPDATE / DELETE / CREATE 等は実行できません。
-- SELECT * は避け、必要な列だけを指定する（スキャン量の削減）。
-- 件数を数えるだけなら COUNT(*)、傾向を見るなら GROUP BY と集計関数を使う。
-  生データを大量に取り出すのではなく、まず集計する。
-- パーティション列がある場合は WHERE で期間を絞る。
-- 「今日」「今月」「先月」などの相対日付は CURRENT_DATE('Asia/Tokyo') を基準に
-  計算する。現在の業務日時が必要なら CURRENT_DATETIME('Asia/Tokyo') を使う。
-- 推測した列名を使ってはいけない。必ず get_table_schema で確認した列名を使う。
-
-## エラーへの対処
-run_query が error を返したら、内容を読んで SQL を修正し、最大 2 回まで再試行する。
-それでも解決しない場合は、何が分からなかったかをユーザーに日本語で説明する。
-スキャン量が大きすぎると言われた場合は、期間を絞る・列を減らす・集計に変えるなどして作り直す。
-
-## 回答スタイル
-- 結論を文章で先に示す。単一の数値・少数の比較は数値と差分を文章で説明する。
-- 図表の種類・X軸・Y軸・必要な内訳はあなたが質問と結果に応じて判断する。
-  最終回答用のrun_queryにはchartを指定する。文章だけで十分ならkind="none"、
-  時間・日付・年月の推移は原則lineで横軸を時間、カテゴリ比較は原則barで横軸をカテゴリにする。
-  数値同士の関係・相関を見るならscatter、量の推移や積み上げ構成を強調するならareaも検討する。
-  pieは全体に対する少数カテゴリ（目安6以下）の構成比に使う。xはカテゴリ、yは非負の数値1列、
-  colorは指定しない。全体を網羅するSQLにし、上位だけにLIMITした結果を全体の構成比として示さない。
-  heatmapは曜日×時間帯、店舗×月など2つの軸の組で濃淡を比較するときに使う。
-  xは横軸、rowは縦軸のカテゴリ、yは濃淡にする数値1列、colorは指定しない。
-  SQLではxとrowの組ごとに1行に集計し、欠けている組を根拠なく0に置き換えない。
-  曜日順は「1 月曜日」のような順序付きラベル、時間帯は数値で返し、時間・年月は横軸に置く。
-  年月は時系列として正しく並ぶDATEやYYYY-MM形式、時間帯は数値でSQLに出力する。
-  内訳が分析に必要な場合だけcolorにカテゴリ列を指定し、yは1つの数値列にする。
-  例：月別・店舗別の来店数ならkind="line", x="月", y=["来店数"], color="店舗"。
-  棒グラフのcolorは積み上げ内訳になる。無関係なカテゴリを常に内訳にしてはいけない。
-  指定する列名はSELECTの出力列名（別名）と一致させる。内訳列もGROUP BYし、
-  同じX軸・内訳の組に結果が1行になる粒度で集計する。
-  表を明示的に求められていない限り、
-  回答本文に Markdown の表を重ねて書かない。SQL や調査途中の結果も本文に列挙しない。
-- run_query の result_role は、探索・検証・途中計算なら supporting、
-  質問の結論に使う結果なら answer を指定する。画面は最後の answer のみを表示候補にする。
-  推移・分布・比較の回答用クエリは、必要な系列を1つの結果にまとめる。
-- run_query の purpose には「店舗別の来店数を集計」のように、何を確認するかを
-  短い日本語で必ず指定する。実行中の進捗と実行詳細に表示される。
-- 日本語で回答する。店舗データの欠落を架空の数値や出来事で補わない。
-  一般知識を使う場合は仮説・提案として位置づけ、確認済みの事実と区別する。
-- 質問の種類によって長さを変える。
-  - 件数・合計・単純な集計結果など「事実を聞かれただけ」の質問には、
-    数値と単位を添えて簡潔に答える。前置きや余計な解説は付けない。
-  - 「傾向はどうか」「なぜそうなっているか」「何が言えるか」のように、
-    データから単純に読み取れない考察を求められた質問には、簡潔さを優先しない。
-    比較対象・時系列の変化・考えられる要因など、データから言える範囲で
-    根拠を示しながら踏み込んで説明する。分からない部分は「分からない」と
-    明言し、憶測で埋めない。
-- 結果が 0 件だったときは「該当なし」と明言し、条件の見直し案を提示する。
-- SQL 全文を回答本文に貼り付ける必要はありません（画面に別途表示されます）。
-"""
-
-
-SYSTEM_INSTRUCTION += """
-
-## 会話の引き継ぎ
-- 結果を読んで次のツールを選ぶ際、その呼び出しのcontext_noteに判明した要点を添える。
-  summaryには確定した事実・条件（対象・期間・指標の定義・単位・数値・除外条件）を箇条書きで1200文字以内に記す。
-  未確認事項や「〜を確認する必要がある」といったTODOはsummaryに書かず、open_questionsに分離する。
-  referencesには実際に読み終えた結果のresult_idだけを指定する。まだ受け取っていない結果を参照しない。
-  メモは他の結果も読む次回の自分への事実の引き継ぎであり、思考過程を書く欄ではない。
-- 最終回答はfinish_answerで返す。answerはユーザー向けの日本語、context_noteは今回の要点、
-  conversation_summaryは今回までの会話全体の目的・合意した条件・主要な事実を4000文字以内にまとめる。
-  未確認事項・過去の確認待ち・解決済みの疑問は累積要約に混ぜない。未確認事項は常に別の最新一覧を参照する。
-  SQLや大量の明細をメモに転載せず、検証に必要なresult_idを残す。
-- 過去の要約はモデルの解釈であり原データではない。省略された数値・条件を推測しない。
-  必要な時はrecall_contextで保存済み結果の必要な列・行を確認する。SQLは必要な時だけinclude_sql=trueで取得する。
-  turn_idやキーワード検索から過去の結果IDも探せる。これは会話内の保存結果の取得で、新しいBigQuery照会ではない。
-- 未確認事項はcontext_note.open_questionsに{id,question}の箇条書き相当の配列で追加・更新する。
-  同じ疑問には同じidを使い、既存の事項を毎回転載する必要はない。変更がなければ空配列にする（既存事項は保持される）。
-  根拠となる結果やユーザーの回答から解決したらresolved_questionsに{id,conclusion}を入れて閉じ、結論を事実として残す。
-  新しい結果を読むたびに、登録中の疑問が解決したかを確認する。解決した疑問を別idで再登録しない。
-  最新の全件一覧は、末尾のツール応答JSONのcurrent_question_state.open_questionsを参照する。
-  通常のユーザー入力では補足のopen_questionsを参照する。過去の呼び出し・メモ・原本にある疑問は歴史的な記録であり、
-  最新一覧にない事項を未解決として扱わない。解決判定はあなたが行い、アプリはその更新を一覧に反映する。
-- finish_answerとask_clarificationはそれぞれ単独で呼ぶ。
-"""
-
 
 def _sql_key(sql: str) -> str:
     return hashlib.sha256(sql.strip().encode("utf-8")).hexdigest()
@@ -208,6 +46,8 @@ def _sql_key(sql: str) -> str:
 def tool_progress(call: Any) -> str:
     """ツールの実行内容を、SQL を出さず短い日本語で伝える。"""
     args = dict(call.args or {})
+    if call.name == tool_catalog.SELECT_TOOL:
+        return "分析の手順を準備しています…"
     if call.name == "list_datasets":
         return "利用できるデータセットを確認しています…"
     if call.name == "list_tables":
@@ -236,6 +76,7 @@ class ToolContext:
     listing_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
     query_cache: dict[str, QueryRun] = field(default_factory=dict)
     context_state: dict[str, Any] = field(default_factory=dict)
+    active_tool_names: list[str] = field(default_factory=list)
     decisions: dict[str, str] = field(default_factory=dict)
     resume_calls: list[Any] | None = None
     execution_control: ExecutionControl | None = None
@@ -495,10 +336,10 @@ class GeminiAgent:
         self.declarations = build_declarations()
 
     # -- 生成 ---------------------------------------------------------
-    def _config(self) -> types.GenerateContentConfig:
+    def _config(self, tool_names: list[str] | None = None) -> types.GenerateContentConfig:
         kwargs: dict[str, Any] = {
-            "system_instruction": SYSTEM_INSTRUCTION + (DEEP_ANALYSIS_INSTRUCTION if self.deep_analysis else ""),
-            "tools": [types.Tool(function_declarations=self.declarations)],
+            "system_instruction": build_system_instruction(tool_names, deep_analysis=self.deep_analysis),
+            "tools": [types.Tool(function_declarations=tool_catalog.active_declarations(self.declarations, tool_names))],
             "temperature": 0.1,
             "automatic_function_calling": types.AutomaticFunctionCallingConfig(
                 disable=True
@@ -514,13 +355,13 @@ class GeminiAgent:
             )
         return types.GenerateContentConfig(**kwargs)
 
-    def _generate(self, contents: list[types.Content]):
+    def _generate(self, contents: list[types.Content], *, tool_names: list[str] | None = None):
         request = context_memory.ensure_user_ending(contents)
         try:
             return self.client.models.generate_content(
                 model=self.settings.gemini_model,
                 contents=request,
-                config=self._config(),
+                config=self._config(tool_names),
             )
         except Exception:
             # 原因調査には構造だけを残す。質問・結果・SQL・署名の内容はログへ追加しない。
@@ -571,6 +412,13 @@ class GeminiAgent:
     def _call_tool(
         self, name: str, args: dict[str, Any], ctx: ToolContext
     ) -> dict[str, Any]:
+        if name == tool_catalog.SELECT_TOOL:
+            try:
+                names = tool_catalog.validate_selection(args.get("names"))
+            except ValueError as exc:
+                raise BQToolError(str(exc)) from exc
+            ctx.active_tool_names = names
+            return {"available_tools": names, "instruction": "次の生成のtoolsに、選択した詳細定義を渡します。使用中の定義を再選択する必要はありません。"}
         if name == "recall_context":
             try:
                 return context_memory.recall(ctx, args)
@@ -753,7 +601,7 @@ class GeminiAgent:
                     error_text=technical_detail(exc, limit=10_000),
                 )
 
-        if not payload.get("error"):
+        if not payload.get("error") and name != tool_catalog.SELECT_TOOL:
             warning = context_memory.accept_note(ctx, args.get("context_note"))
             if warning:
                 payload = {**payload, "context_note_warning": warning}
@@ -847,7 +695,7 @@ class GeminiAgent:
                 if on_progress is not None and not processed_tools and not ctx.turn_runs:
                     on_progress("質問に合う調べ方を考えています…")
                 try:
-                    response = self._generate(context_memory.build_request(contents, ctx))
+                    response = self._generate(context_memory.build_request(contents, ctx), tool_names=list(ctx.active_tool_names))
                 except Exception as exc:  # noqa: BLE001 - 記録してから同じ例外を上に伝える
                     if ctx.execution_control is not None:
                         ctx.execution_control.check()
@@ -913,6 +761,7 @@ class GeminiAgent:
                 responses = []
                 # 確認質問と同時に要求されたデータ取得は、回答が来るまで実行しない。
                 clarification_call = next((call for call in pending_calls if call.name == "ask_clarification"), None)
+                selection_call = next((call for call in pending_calls if call.name == tool_catalog.SELECT_TOOL), None)
                 final_call = next((call for call in pending_calls if call.name == "finish_answer"), None)
                 final_payload = None
                 clarification = None
@@ -926,7 +775,12 @@ class GeminiAgent:
                         skipped.function_response.id = getattr(call, "id", None)
                         responses.append(skipped)
                         continue
-                    if clarification_call is None and final_call is not None and call is not final_call:
+                    if clarification_call is None and selection_call is not None and call is not selection_call:
+                        skipped = types.Part.from_function_response(name=call.name, response={"error": "ツール定義の選択を優先したため未実行です。選択後に必要なら再度呼んでください。"})
+                        skipped.function_response.id = getattr(call, "id", None)
+                        responses.append(skipped)
+                        continue
+                    if clarification_call is None and selection_call is None and final_call is not None and call is not final_call:
                         skipped = types.Part.from_function_response(name=call.name, response={"error": "最終回答を優先したため未実行です。"})
                         skipped.function_response.id = getattr(call, "id", None)
                         responses.append(skipped)

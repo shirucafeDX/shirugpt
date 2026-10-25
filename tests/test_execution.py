@@ -70,7 +70,7 @@ class ExecutionTests(unittest.TestCase):
         ctx.execution_control = ExecutionControl()
         agent = GeminiAgent(settings, client=Mock())
 
-        def generate(contents):
+        def generate(contents, **kwargs):
             ctx.execution_control.request_stop()
             return response('', call='run_query')
 

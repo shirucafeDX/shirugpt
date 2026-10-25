@@ -71,7 +71,7 @@ def sync_turns(contents, ctx) -> dict:
             for j, part in enumerate(contents[i].parts or []):
                 if part.function_call:
                     calls.append(part.function_call)
-                if part.function_response and part.function_response.name != "finish_answer":
+                if part.function_response and part.function_response.name not in ("finish_answer", "select_tools"):
                     payload = part.function_response.response or {}
                     result_id = payload.get("result_id") or f"legacy_{i}_{j}"
                     if result_id not in state["results"]:
