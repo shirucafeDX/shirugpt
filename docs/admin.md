@@ -134,6 +134,7 @@ API が使用量を返さない場合、その呼び出しの内訳は null で�
 Interactions APIへの移行では、`usage_events`に`cached_input_tokens`と`api`を追加します。
 既存テーブルは初期化時に不足カラムを追加し、旧ログのNULLはそのまま保持します。
 `prompt_tokens`はキャッシュ分を含むAPI報告値で、`cached_input_tokens`はその内訳です。
+Interactions SDKの`status_code`もHTTPコードとして保存し、429が続いた場合は`error_code=429`を記録します。
 費用表示・月次使用制限は従来のモデル別標準単価による推定を維持します。
 キャッシュ割引や期間限定還元を反映した実請求額とは区別してください。
 

@@ -823,7 +823,7 @@ class GeminiAgent:
                 try:
                     if interactions.enabled(self.settings):
                         response = interactions.generate(self.client, contents, ctx,
-                            self._config(list(ctx.active_tool_names)))
+                            self._config(list(ctx.active_tool_names)), on_progress=on_progress)
                     else:
                         response = self._generate(context_memory.build_request(contents, ctx), tool_names=list(ctx.active_tool_names))
                 except Exception as exc:  # noqa: BLE001 - 記録してから同じ例外を上に伝える

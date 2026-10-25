@@ -324,6 +324,9 @@ def friendly_error(exc: Exception) -> str:
     """生の例外を、ユーザー向けの分かりやすい日本語に変換する。"""
     if isinstance(exc, (SQLGuardError, BQToolError)):
         return str(exc)
+    if error_code(exc) == 429:
+        return ("APIが混雑しているか、利用枠が不足しています。"
+                "少し時間をおいて、同じ質問で再度お試しください。")
 
     text = str(exc)
 
@@ -381,8 +384,6 @@ def friendly_error(exc: Exception) -> str:
                 "質問を具体的に言い換えると改善する場合があります。"
             )
         return "クエリを実行できませんでした。条件を変えて再度お試しください。"
-    if isinstance(exc, gexc.TooManyRequests):
-        return "リクエストが集中しています。少し時間をおいて再度お試しください。"
     if isinstance(exc, gexc.ServiceUnavailable):
         return "BigQuery 側が一時的に応答していません。少し待って再度お試しください。"
 
@@ -404,15 +405,13 @@ def technical_detail(exc: Exception, limit: int = 600) -> str:
 def error_code(exc: Exception) -> int | None:
     """例外が持つ HTTP ステータス相当のコードを取り出す（利用ログ記録用）。
 
-    google.genai.errors.APIError も google.api_core.exceptions.GoogleAPICallError
-    も `.code` 属性を持つが、片方は素の int、もう片方は HTTPStatus（IntEnum）
-    なので int() で正規化する。属性が無い・変換できない例外（SQLGuardError /
-    BQToolError など自前の例外）は None を返す。
+    従来の `.code` とInteractions SDKの `.status_code` に対応し、
+    HTTPStatus（IntEnum）も int() で正規化する。変換できなければ None。
     """
-    code = getattr(exc, "code", None)
-    if code is None:
-        return None
-    try:
-        return int(code)
-    except (TypeError, ValueError):
-        return None
+    for code in (getattr(exc, 'code', None), getattr(exc, 'status_code', None),
+                 getattr(getattr(exc, 'response', None), 'status_code', None)):
+        try:
+            return int(code)
+        except (TypeError, ValueError):
+            continue
+    return None

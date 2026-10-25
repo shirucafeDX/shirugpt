@@ -3,16 +3,23 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
+import random
 import time
+from email.utils import parsedate_to_datetime
 
 from google import genai
 from google.genai import types
 
 from . import context_memory as memory
 from .token_budget import estimate_tokens
+from .bq_tools import error_code
+from .execution import ExecutionStopped
 
 logger = logging.getLogger(__name__)
 RETENTION_SECONDS = 7 * 86400
+RATE_LIMIT_RETRIES = 3
+MAX_RETRY_WAIT_SECONDS = 30
 
 
 def enabled(settings):
@@ -135,7 +142,64 @@ def _get(value, key, default=None):
 
 
 def _code(exc):
-    return getattr(exc, 'code', None) or getattr(exc, 'status_code', None)
+    return error_code(exc)
+
+
+def _retry_delay(exc, attempt):
+    delay = 2 ** (attempt + 1) + random.uniform(0, 1)
+    headers = getattr(getattr(exc, 'response', None), 'headers', {})
+    retry_after = headers.get('retry-after') if headers else None
+    if retry_after is not None:
+        try:
+            requested = float(retry_after)
+        except (TypeError, ValueError):
+            try:
+                requested = parsedate_to_datetime(retry_after).timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                requested = 0
+        if math.isfinite(requested):
+            delay = max(delay, requested)
+    # 長いRetry-Afterは無視して早期再送せず、利用者へ待機を案内する。
+    return delay if delay <= MAX_RETRY_WAIT_SECONDS else None
+
+
+def _wait_for_retry(ctx, seconds):
+    control = ctx.execution_control
+    if control is None:
+        time.sleep(seconds)
+    else:
+        control.check()
+        control.stopped.wait(seconds)
+        control.check()
+
+
+def _create(api, body, ctx, on_progress):
+    """明示的に拒否された429だけを再試行。SQLや結果処理は繰り返さない。"""
+    for attempt in range(RATE_LIMIT_RETRIES + 1):
+        if ctx.execution_control is not None:
+            ctx.execution_control.check()
+        try:
+            result = api.create(**body)
+        except Exception as exc:
+            if _code(exc) != 429 or attempt == RATE_LIMIT_RETRIES:
+                raise
+            delay = _retry_delay(exc, attempt)
+            if delay is None:
+                raise
+            logger.warning('analysis_metrics %s', memory.encoded({
+                'event': 'interaction_rate_limit_retry', 'session_id': ctx.session_id,
+                'turn_id': ctx.turn_id, 'attempt': attempt + 1, 'wait_seconds': round(delay, 3)}))
+            if on_progress is not None:
+                on_progress(f'AIが混み合っています。{math.ceil(delay)}秒待って再試行します（{attempt + 1}/{RATE_LIMIT_RETRIES}）…')
+            _wait_for_retry(ctx, delay)
+        else:
+            if attempt and on_progress is not None:
+                try:
+                    on_progress('調査を続けています…')
+                except ExecutionStopped:
+                    # 応答済みの使用量を記録してから、エージェント側で停止する。
+                    pass
+            return result
 
 
 def _response(interaction):
@@ -170,7 +234,7 @@ def _response(interaction):
         finish_message=status if finish != 'STOP' else None)], usage_metadata=metadata)
 
 
-def generate(client, contents, ctx, config):
+def generate(client, contents, ctx, config, *, on_progress=None):
     api = client.interactions
     if isinstance(client, genai.Client):
         # SDK 2.18.1はattempts=0を1へ正規化した後、Interactions側で
@@ -217,7 +281,7 @@ def generate(client, contents, ctx, config):
     if previous:
         body['previous_interaction_id'] = previous
     try:
-        interaction = api.create(**body)
+        interaction = _create(api, body, ctx, on_progress)
     except Exception as exc:
         if previous and _code(exc) == 404:
             # モデルやエンドポイントの404を期限切れと誤認しない。
@@ -230,7 +294,7 @@ def generate(client, contents, ctx, config):
                 raise
             body.pop('previous_interaction_id')
             body['input'] = _bootstrap(contents, ctx)
-            interaction = api.create(**body)
+            interaction = _create(api, body, ctx, on_progress)
             reason, previous = 'expired_on_server', None
         else:
             raise

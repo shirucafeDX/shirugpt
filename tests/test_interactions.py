@@ -16,7 +16,7 @@ from google.cloud import bigquery
 
 from src import interactions, context_memory as memory
 from src.agent import GeminiAgent, ToolContext, ConfirmationPending
-from src.bq_tools import ConfirmationRequired, QueryRun
+from src.bq_tools import ConfirmationRequired, QueryRun, error_code, friendly_error
 from src.chat_history import pack, unpack
 from src.usage_log import UsageLogger, _SCHEMA
 from src.execution import ExecutionControl, ExecutionStopped
@@ -62,7 +62,8 @@ class InteractionTests(unittest.TestCase):
         def handler(request):
             self.assertIn('/v1beta1/projects/test-project/locations/global/interactions',str(request.url))
             self.requests.append(json.loads(request.content) if request.content else {})
-            return httpx.Response(200, json=next(queue))
+            value=next(queue)
+            return value if isinstance(value,httpx.Response) else httpx.Response(200,json=value)
         return genai.Client(enterprise=True, project='test-project', location='global',
             credentials=Credentials(token='local-test'), http_options=types.HttpOptions(
                 api_version='v1beta1', retry_options=types.HttpRetryOptions(attempts=0),
@@ -390,6 +391,87 @@ class InteractionTests(unittest.TestCase):
         agent.run(self.contents,self.ctx)
         self.assertNotIn('previous_interaction_id',client.interactions.create.call_args.kwargs)
         self.ctx.tools.run_query.assert_not_called()
+
+    def test_sdk_429_retries_identical_input_and_counts_only_successful_generation(self):
+        rejected=httpx.Response(429,json={'error':{'message':'Resource exhausted. Please try again later.',
+                                                  'code':'too_many_requests'}})
+        progress=[]
+        with self.sdk([rejected,interaction('state-1',[output('回答')])]) as client, \
+             patch('src.interactions._wait_for_retry') as wait, \
+             patch('src.interactions.random.uniform',return_value=0):
+            result=GeminiAgent(self.settings,client=client).run(self.contents,self.ctx,on_progress=progress.append)
+        self.assertEqual(result.text,'回答')
+        self.assertEqual(len(self.requests),2)
+        self.assertEqual(self.requests[0],self.requests[1])
+        wait.assert_called_once_with(self.ctx,2)
+        self.assertTrue(any('混み合' in text for text in progress))
+        self.assertEqual(self.ctx.session_prompt_tokens,100)
+        self.ctx.usage_logger.log_gemini_call.assert_called_once()
+
+    def test_sdk_429_exhaustion_has_friendly_message_and_http_code(self):
+        replies=[httpx.Response(429,json={'error':{'message':'Resource exhausted.','code':'too_many_requests'}})
+                 for _ in range(4)]
+        with self.sdk(replies) as client,patch('src.interactions._wait_for_retry') as wait, \
+             patch('src.interactions.random.uniform',return_value=0):
+            with self.assertRaises(Exception) as caught:
+                GeminiAgent(self.settings,client=client).run(self.contents,self.ctx)
+        self.assertEqual(len(self.requests),4)
+        self.assertEqual([args.args[1] for args in wait.call_args_list],[2,4,8])
+        self.assertEqual(error_code(caught.exception),429)
+        self.assertIn('同じ質問',friendly_error(caught.exception))
+        self.assertNotIn('内容を変えて',friendly_error(caught.exception))
+        self.assertEqual(self.ctx.interaction_state,{})
+        self.assertEqual(self.ctx.tools.mock_calls,[])
+        self.ctx.usage_logger.log_gemini_call.assert_not_called()
+        self.assertEqual(self.ctx.usage_logger.log_error.call_args.kwargs['error_code'],429)
+
+    def test_429_after_query_does_not_rerun_sql(self):
+        frame=pd.DataFrame({'value':[1]})
+        self.ctx.tools.run_query.return_value=QueryRun('SELECT 1','SELECT 1',1,1,frame,{'row_count':1})
+        replies=[interaction('state-1',[call('run_query',{'sql':'SELECT 1'})]),
+                 httpx.Response(429,json={'error':{'code':'too_many_requests','message':'Resource exhausted.'}}),
+                 interaction('state-2',[output('回答')])]
+        with self.sdk(replies) as client,patch('src.interactions._wait_for_retry'):
+            GeminiAgent(self.settings,client=client).run(self.contents,self.ctx)
+        self.ctx.tools.run_query.assert_called_once()
+        self.assertEqual(self.requests[1],self.requests[2])
+        self.assertEqual(self.requests[1]['previous_interaction_id'],'state-1')
+        self.assertEqual(self.ctx.session_prompt_tokens,200)
+
+    def test_rate_limit_wait_can_be_stopped_without_resending(self):
+        self.ctx.execution_control=ExecutionControl()
+        def stop(seconds):
+            self.ctx.execution_control.request_stop()
+            return True
+        self.ctx.execution_control.stopped.wait=Mock(side_effect=stop)
+        with self.sdk([httpx.Response(429,json={'error':{'code':'too_many_requests','message':'busy'}})]) as client:
+            with self.assertRaises(ExecutionStopped):
+                GeminiAgent(self.settings,client=client).run(self.contents,self.ctx)
+        self.assertEqual(len(self.requests),1)
+        self.assertEqual(self.ctx.interaction_state,{})
+
+    def test_retry_after_longer_than_wait_budget_is_not_ignored(self):
+        reply=httpx.Response(429,headers={'Retry-After':'60'},json={'error':{'code':'too_many_requests','message':'busy'}})
+        with self.sdk([reply]) as client,patch('src.interactions._wait_for_retry') as wait:
+            with self.assertRaises(Exception) as caught:
+                GeminiAgent(self.settings,client=client).run(self.contents,self.ctx)
+        self.assertEqual(error_code(caught.exception),429)
+        self.assertEqual(len(self.requests),1)
+        wait.assert_not_called()
+
+    def test_retry_after_seconds_and_http_date_are_honoured(self):
+        from email.utils import formatdate
+        now=1700000000
+        for header,expected in [('5',5),(formatdate(now+7,usegmt=True),7)]:
+            replies=[httpx.Response(429,headers={'Retry-After':header},
+                json={'error':{'code':'too_many_requests','message':'busy'}}),interaction('state-1',[output('回答')])]
+            ctx=ToolContext(tools=Mock(),settings=self.settings)
+            with self.subTest(header=header),self.sdk(replies) as client, \
+                 patch('src.interactions.time.time',return_value=now), \
+                 patch('src.interactions.random.uniform',return_value=0), \
+                 patch('src.interactions._wait_for_retry') as wait:
+                GeminiAgent(self.settings,client=client).run([user('質問')],ctx)
+                wait.assert_called_once_with(ctx,expected)
 
 
 class InteractionConfigTests(unittest.TestCase):
