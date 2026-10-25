@@ -11,7 +11,7 @@ COMMON_INSTRUCTION = """あなたはBigQueryのデータ分析・施策検討を
 - 条件確認が必要ならask_clarificationを選び、選択肢付きの質問をツールで提示する。明確な質問・回答済み条件は再確認しない。
 - 最終回答はfinish_answerを選んで返す。必要な定義がなければselect_toolsで選ぶ。
 - 日時は型・意味を確認し、業務日時はAsia/Tokyoを基準に扱う。根拠なく9時間を加算しない。
-- 過去の要約は解釈であり原データではない。不足する詳細はrecall_contextで確認する。
+- 過去の要約は解釈であり原データではない。不足する詳細はrecall_context/analyze_resultで確認する。
 - 最新のcurrent_question_state.open_questions（通常入力では補足open_questions）が未確認事項の正本。
   過去のメモを未解決の状態として扱わず、解決済みの疑問を再登録しない。
 """
@@ -105,7 +105,17 @@ QUERY_INSTRUCTION = """## SQL を書くときの規則
   計算する。現在の業務日時が必要なら CURRENT_DATETIME('Asia/Tokyo') を使う。
 - 推測した列名を使ってはいけない。必ず get_table_schema で確認した列名を使う。
 - 質問に必要な粒度で集計する。学年別と学部別を独立に尋ねられたら、不要な学年×学部のクロス集計を作らない。
-- 返ってくるのは行数・列情報・統計・サンプルのみ。大量の明細ではなくSQLで先に集計する。"""
+- Do not move data to the LLM when computation can be moved to the data.
+- SQLは質問に必要な対象・期間・列・粒度に絞る。まず直接答える集計を行い、不足時だけ追加照会する。
+  上位・下位・差分・増加率/減少率・COUNT DISTINCT・window・日付集計も可能な限りSQL側で計算する。
+  表示用には必要な集計結果を最大MAX_RESULT_ROWS（既定5000行）まで保持する。全明細を取得する意味ではない。
+- 小さい結果（既定100行以下でデータの推定トークン上限内）はCSVで返す。
+  中規模（101〜1000行）・大規模（1001行以上）は行データを送らず、result_id・列情報・行数を返す。
+  表示用だけならresult_mode=schemaを指定して小さい結果もメタデータだけにできる。
+  閾値は実行設定で変更可能。戻り値のdelivery・size_class・省略数を確認し、schemaから結果の数値を推測しない。
+  analyze_resultで保存済み結果に必要な計算だけ行う。全行のページ取得・chunkingを最初の解決策にしない。
+  保存済み範囲に不足する列・粒度・期間が必要な場合だけBigQueryへ追加SQLを行う。
+- 合計・構成比は加算可能な指標だけで計算する。平均・率・重複するユニーク人数を単純合計しない。"""
 
 QUERY_ERRORS_INSTRUCTION = """## エラーへの対処
 run_query が error を返したら、内容を読んで SQL を修正し、最大 2 回まで再試行する。
@@ -132,16 +142,52 @@ CHARTS_INSTRUCTION = """## 図表と回答用クエリ
 - run_query の result_role は、探索・検証・途中計算なら supporting、
   質問の結論に使う結果なら answer を指定する。画面は最後の answer のみを表示候補にする。
   推移・分布・比較の回答用クエリは、必要な系列を1つの結果にまとめる。
+- 取得済みの結果を図示するだけならrecall_context(action="present", result_id, chart)を使い、再実行しない。
+  列名を日本語の別名にするだけのSQL再実行も避け、保存済みの列名でchartを指定する。
 - run_query の purpose には「店舗別の来店数を集計」のように、何を確認するかを
   短い日本語で必ず指定する。実行中の進捗と実行詳細に表示される。"""
 
 RECALL_INSTRUCTION = """## 保存済み結果の参照
-- 過去の要約は解釈。必要な数値・条件はrecall_contextで保存済み原結果の必要な列・行を確認する。
-- columnsとoffset・limitを指定し、最大100行。SQLは必要な時だけinclude_sql=trueで取得する。
-- turn_idや検索で過去の結果IDを探せる。この会話内の参照であり新しいBigQuery照会ではない。
-- ページ内の統計と元の件数、source_truncatedなどの切り捨てを区別する。"""
+- 過去の要約はモデルの解釈であり原データではない。省略された数値・条件を推測しない。
+  必要な時はrecall_contextで保存済み結果の必要な列・行を確認する。SQLは必要な時だけinclude_sql=trueで取得する。
+  turn_idやキーワード検索から過去の結果IDも探せる。これは会話内の保存結果の取得で、新しいBigQuery照会ではない。
+- read（既定）では必要なcolumnsとoffset・limitを指定する。最大100行。filtersで期間・カテゴリを絞ってからページ分割できる。
+  filtersは最大5条件のAND。columnは保存済み列、opはeq/in/gte/lte/is_null/not_null。
+  valuesは型に合う文字列配列で、日時はISO形式。eq/gte/lteは1値、inは最大20値、欠損判定はvalues不要。
+  通常はanalyze_resultで集計・Top-K・絞り込みを優先する。全表の連続ページ取得を最初に選ばない。
+  readの結果もCSV。型・null_markerを確認する。推定トークン超過時はセルを切らず返却行数を減らす。
+  returned_row_countとnext_offsetを使って続きを取得する。返却0行で文字量超過の案内があればcolumnsで列を絞る。
+  matched_row_countは条件一致数、total_row_countは保存済み全行数。元テーブル全体の件数とは限らない。
+- action="present"ならresult_idとchartだけで保存済み全結果を図示できる。行データは再送せずBigQueryも再実行しない。
+  chartの列名は保存済み列名を使う。readのfiltersやcolumnsは表示範囲を変更しない。
+- ページ内の統計と元の結果の行数、source_truncatedなどの切り捨てを区別して判断する。"""
 
-
+ANALYSIS_INSTRUCTION = """## 保存済み表の段階的分析
+Do not move data to the LLM when computation can be moved to the data.
+- analyze_resultはこの会話のresult_idだけを対象にし、BigQuery再照会や追加の要約用LLM呼び出しはしない。
+  get_schema/get_row_countで列・行数、describe_dataで基本統計を確認する。推測した列名を使わない。
+- 「面白い傾向」「自由に分析」なら、関連schema → describe_data → カテゴリ分布/数値分布 →
+  有望な方向のaggregate/compare_groups → 時間列があればanalyze_timeseries → detect_outliersの順を基本とする。
+  結果を解釈して次を選ぶ。全列・全組み合わせを無差別に計算せず、不要な段階は省略できる。
+- aggregateはgroup_byとaggregations[{column,function,alias}]。functionはcount/nunique/sum/mean/median/min/max/std/var。
+  平均・率・ユニーク人数の合計を業務上の全体値としない。集計の重みや元の重複情報が必要ならBigQueryで計算する。
+- top_kはsort_by、ascending=trueで下位、absolute=trueで絶対値順。get_distinct_valuesはcolumnsを1列指定する。
+- filter_dataはfiltersとcolumns・offset・sort_byで必要な範囲だけ取得する。filtersはAND、eq/in/gte/lte/is_null/not_null。
+- compare_groupsはgroup_byを1列、metric、aggregation（既定mean）、任意のbaseline値を文字列で指定する。
+- correlationは数値columnsを2〜6列、method=pearson/spearman。ペアごとの有効件数と定数列・欠損に注意する。
+- detect_outliersはmetric、method=iqr（1.5 IQR）/z_score（3σ）、任意のcolumns。外れ値を誤データと断定しない。
+- analyze_timeseriesはtime_column、metric、必要ならgroup_by、frequency=day/week/month/year、window（移動平均、既定3）。
+  同一期間・内訳が重複する時だけaggregationを明示する。viewはchronological/largest_change/largest_increase/largest_decrease/largest_rate。
+  欠けた期間を0補完せず、期間のギャップは前期比を未定義にする。前期0・負数の変化率も未定義。変化率は元の値と増減量も読む。
+- sample_dataは再現可能な無作為順の少数例。標本から全体を断定しない。
+- 固定機能で表せない分析はoperation=sqlとsqlで、保存済みdata表へのSQLite SELECTを使う。
+  CTE・window・条件集計は可。SELECTのみ、外部表・ファイル・拡張・書き込み・再帰は禁止。SQLite方言で書く。
+  Decimalは文字列として保存され、SQLite数値演算で精度を失う場合がある。精密計算や保存範囲外の分析はBigQueryで行う。
+- 返却はMAX_PREVIEW_ROWS（既定50）・推定トークン予算で制限。分析結果のresult_idも次の分析や参照に利用できる。
+  上位だけを母集団全体と説明しない。source_row_count/matched_row_count/source_truncatedと省略範囲を区別する。
+- CSVはヘッダー付き。型・null_markerを参照し、空文字と欠損・引用符内の改行を区別する。日時の時差変換は行わない。
+- 全件が不可欠な明示的な依頼に限り、集計・統計・絞り込み・Top-Kで解決できない理由を判断した後でページ参照を使う。
+  単純に全行を分割して読まない。解釈と説明はLLM、数値計算はSQL/Pythonが担当する。"""
 
 ANSWER_INSTRUCTION = """## 回答スタイル
 - 表を明示的に求められていない限り、回答本文にMarkdownの表を重ねて書かない。
@@ -188,7 +234,8 @@ TOOL_INSTRUCTION_KEYS = {
     "get_table_schema": ("schema",),
     "run_query": ("metrics", "datetime", "query", "query_errors", "charts"),
     "ask_clarification": ("metrics", "clarification"),
-    "recall_context": ("metrics", "datetime", "recall"),
+    "recall_context": ("metrics", "datetime", "charts", "recall"),
+    "analyze_result": ("metrics", "datetime", "analysis"),
     "finish_answer": ("metrics", "datetime", "advice", "answer", "finish"),
 }
 
@@ -203,6 +250,7 @@ INSTRUCTION_BLOCKS = {
     "query_errors": QUERY_ERRORS_INSTRUCTION,
     "charts": CHARTS_INSTRUCTION,
     "recall": RECALL_INSTRUCTION,
+    "analysis": ANALYSIS_INSTRUCTION,
     "advice": ADVICE_INSTRUCTION,
     "answer": ANSWER_INSTRUCTION,
     "finish": FINISH_INSTRUCTION,

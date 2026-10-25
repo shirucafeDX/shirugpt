@@ -201,6 +201,13 @@ def register_result(ctx, name: str, args: dict, payload: dict) -> dict:
               "note": previous.get("note", "")}
     if name == "run_query":
         record["query_key"] = hashlib.sha256(str(args.get("sql", "")).strip().encode()).hexdigest()
+    elif name == "analyze_result":
+        record["analysis_key"] = result_id
+    elif name == "recall_context" and args.get("result_id"):
+        source = state["results"].get(args["result_id"], {})
+        for key in ("query_key", "analysis_key"):
+            if source.get(key):
+                record[key] = source[key]
     state["results"][result_id] = record
     if state["turns"] and result_id not in state["turns"][-1]["result_ids"]:
         state["turns"][-1]["result_ids"].append(result_id)
@@ -232,7 +239,8 @@ def catalogue(state: dict, ids: list[str]) -> list[dict]:
             item["columns"] = [{k: column[k] for k in ("name", "dtype") if k in column}
                                for column in result["columns"] if isinstance(column, dict)]
         for key in ("source_result_id", "total_row_count", "source_truncated", "offset", "more_rows",
-                    "statistics_scope", "only_saved_samples_available", "available_sample_count"):
+                    "statistics_scope", "only_saved_samples_available", "available_sample_count",
+                    "matched_row_count", "filters_applied", "returned_row_count", "next_offset"):
             if key in payload:
                 item[key] = payload[key]
         if payload.get("error"):
@@ -358,7 +366,24 @@ def build_request(contents, ctx) -> list[types.Content]:
     state["last_request"] = {"original_chars": len(encoded([c.model_dump(exclude_none=True) for c in contents])),
                              "sent_chars": len(encoded([c.model_dump(exclude_none=True) for c in request])),
                              "compacted_results": compacted, "recent_turns": len(recent), "older_turns": len(older)}
-    return request
+    from .token_budget import bound_history
+    return bound_history(request, ctx)
+
+
+def saved_result(ctx, result_id):
+    """この会話の保存済み表だけにアクセスする。グローバルな名前検索はしない。"""
+    from types import SimpleNamespace
+    if not isinstance(result_id, str):
+        raise ValueError("この会話のresult_idを指定してください。")
+    record = state_for(ctx)["results"].get(result_id, {})
+    run = ctx.query_cache.get(record.get("query_key"))
+    if run is not None:
+        return run
+    saved = ctx.analysis_cache.get(record.get("analysis_key"))
+    if saved is not None:
+        return SimpleNamespace(dataframe=saved["dataframe"], truncated=saved["source_truncated"],
+                               notes=saved.get("notes", []), sql="")
+    raise ValueError("この会話に分析可能な保存済み表がありません。元の結果を取得してください。")
 
 
 def recall(ctx, args: dict) -> dict:
@@ -397,26 +422,56 @@ def recall(ctx, args: dict) -> dict:
     offset, limit = args.get("offset", 0), args.get("limit", 20)
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
         raise ValueError("offsetは0以上、limitは1〜100の整数で指定してください。")
-    run = ctx.query_cache.get(record.get("query_key"))
+    try:
+        run = saved_result(ctx, args["result_id"])
+    except ValueError:
+        run = None
     if run is not None:
-        from .summarize import summarize_dataframe
+        from .token_budget import BudgetPolicy, TokenBudgetManager
+
         columns = args.get("columns", list(run.dataframe.columns))
         if (not isinstance(columns, list) or not columns or any(not isinstance(col, str) or col not in run.dataframe.columns for col in columns) or len(set(columns)) != len(columns)):
             raise ValueError("columnsには原結果にある列名を指定してください。")
-        frame = run.dataframe.loc[:, columns].iloc[offset:offset + limit]
-        result = {"source_result_id": args["result_id"], "total_row_count": len(run.dataframe), "offset": offset,
-                  "source_truncated": run.truncated, "result": summarize_dataframe(frame, sample_rows=limit),
+        from .result_access import filter_saved_result
+        matched = filter_saved_result(run.dataframe, args.get("filters"))
+        frame = matched.loc[:, columns].iloc[offset:offset + limit]
+        policy = BudgetPolicy.from_settings(ctx.settings)
+        frame = frame.iloc[:policy.max_preview_rows]
+        page = TokenBudgetManager(policy).table(frame, truncated=run.truncated)
+        returned_count = page["sent_row_count"]
+        result = {"source_result_id": args["result_id"], "total_row_count": len(run.dataframe), "matched_row_count": len(matched),
+                  "filters_applied": args.get("filters") or [], "offset": offset,
+                  "source_truncated": run.truncated, "result": page,
+                  "returned_row_count": returned_count,
+                  "next_offset": offset + returned_count if returned_count and offset + returned_count < len(matched) else None,
                   "statistics_scope": "returned_rows_only",
-                  "more_rows": offset + len(frame) < len(run.dataframe), "notes": run.notes}
+                  "more_rows": offset + returned_count < len(matched), "notes": run.notes}
         if args.get("include_sql") is True:
             result["sql"] = run.sql
         return result
+    if args.get("filters"):
+        raise ValueError("全結果が保存されていないため条件指定できません。保存済みサンプルの列・行を参照してください。")
     payload = dict(record["payload"])
     sql = payload.pop("executed_sql", None)
     if args.get("include_sql") is True and sql:
         payload["sql"] = sql
     if isinstance(payload.get("result"), dict):
         summary = dict(payload["result"])
+        if summary.get("delivery") == "csv":
+            from .result_csv import recall_csv_snapshot
+            from .token_budget import BudgetPolicy
+            page, available = recall_csv_snapshot(summary, columns=args.get("columns"), offset=offset, limit=limit,
+                                                  policy=BudgetPolicy.from_settings(ctx.settings))
+            count = page["sent_row_count"]
+            return {"source_result_id": args["result_id"], "result": page,
+                    "total_row_count": payload.get("total_row_count", summary.get("row_count")),
+                    "source_truncated": summary.get("source_truncated", False),
+                    "only_saved_samples_available": True, "available_sample_count": available,
+                    "notes": payload.get("notes", []),
+                    "offset": offset, "returned_row_count": count, "statistics_scope": "returned_rows_only",
+                    "more_rows": offset + count < available,
+                    "next_offset": offset + count if count and offset + count < available else None,
+                    **({"sql": sql} if args.get("include_sql") is True and sql else {})}
         rows = summary.get("sample_rows", [])
         columns = args.get("columns")
         if columns is not None:

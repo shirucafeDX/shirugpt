@@ -9,6 +9,7 @@ Gemini から Function Calling で呼ばれる 4 つの関数を提供する:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,7 +46,7 @@ class ConfirmationRequired(Exception):
 
 @dataclass
 class QueryRun:
-    """1 回のクエリ実行の結果。dataframe は UI 用、summary のみ Gemini に渡す。"""
+    """UI用の取得済み全結果。モデルへの返却はAnalysis Layerで別に制限する。"""
 
     sql: str
     original_sql: str
@@ -58,6 +59,7 @@ class QueryRun:
     purpose: str = ""
     result_role: str = "answer"
     chart: dict[str, Any] | None = None
+    execution_seconds: float = 0.0
 
 
 def _flatten_schema(
@@ -239,6 +241,7 @@ class BigQueryTools:
             maximum_bytes_billed=self.settings.max_bytes_billed,
             use_query_cache=True,
         )
+        started = time.monotonic()
         job = self.client.query(
             guard.sql, job_config=job_config, location=self.settings.bq_location
         )
@@ -247,8 +250,15 @@ class BigQueryTools:
             if self.execution_control is not None:
                 self.execution_control.set_query_job(job)
                 self.execution_control.check()
-            rows = job.result(max_results=cap + 1)
+            rows = job.result(max_results=cap + 1,
+                              timeout=getattr(self.settings, "bq_query_timeout_seconds", 120))
             df = rows.to_dataframe(create_bqstorage_client=False)
+        except TimeoutError as exc:
+            try:
+                job.cancel(timeout=10)
+            except Exception:
+                pass
+            raise BQToolError("BigQueryの実行がタイムアウトしました。対象期間・列・粒度を絞ってください。") from exc
         finally:
             if self.execution_control is not None:
                 self.execution_control.clear_query_job()
@@ -277,6 +287,7 @@ class BigQueryTools:
             notes=notes,
             truncated=truncated,
             purpose=purpose,
+            execution_seconds=round(time.monotonic() - started, 6),
         )
 
     def run_query(

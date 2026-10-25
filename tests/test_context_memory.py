@@ -1,5 +1,6 @@
 """引き継ぎメモ・原本保全・選択的参照。外部APIは使わない。"""
 import io
+import csv
 import json
 import unittest
 from types import SimpleNamespace
@@ -53,6 +54,9 @@ class MemoryTests(unittest.TestCase):
         return self.agent._generate.call_args_list
 
     def test_only_read_results_shrink_and_archive_and_signatures_remain_exact(self):
+        # 旧履歴に保存された500行の応答も、原本を保って短縮できる。
+        self.agent._query_payload = Mock(return_value={
+            "executed_sql": self.run.sql, "result": self.run.summary, "notes": self.run.notes})
         calls = self.query_then_analyze()
         before = calls[1].args[0]
         after = calls[2].args[0]
@@ -71,7 +75,7 @@ class MemoryTests(unittest.TestCase):
 
     def test_bad_note_does_not_discard_or_block_tool(self):
         calls = self.query_then_analyze(self.note(['outside-this-chat']))
-        self.assertIn('sample_rows', calls[2].args[0][2].parts[0].function_response.response['result'])
+        self.assertEqual(calls[2].args[0][2].parts[0].function_response.response['result']['delivery'], 'schema')
         self.assertIn('context_note_warning', self.contents[4].parts[0].function_response.response)
         self.ctx.tools.list_datasets.assert_called_once()
 
@@ -127,7 +131,7 @@ class MemoryTests(unittest.TestCase):
     def test_recall_selects_columns_and_rows_beyond_original_sample_without_queries(self):
         self.query_then_analyze()
         result = memory.recall(self.ctx, {'result_id': self.rid, 'columns': ['売上'], 'offset': 550, 'limit': 2})
-        self.assertEqual(result['result']['sample_rows'], [{'売上': 550}, {'売上': 551}])
+        self.assertEqual(list(csv.DictReader(io.StringIO(result['result']['csv']))), [{'売上': '550'}, {'売上': '551'}])
         self.assertTrue(result['source_truncated'])
         self.assertEqual(result['total_row_count'], 600)
         self.assertNotIn('sql', result)
@@ -159,7 +163,7 @@ class MemoryTests(unittest.TestCase):
             name='run_query', response={'executed_sql': self.run.sql, 'result': self.run.summary})])])
         memory.sync_turns(self.contents, self.ctx)
         result = memory.recall(self.ctx, {'result_id': 'legacy_2_0', 'offset': 550, 'limit': 1})
-        self.assertEqual(result['result']['sample_rows'][0]['売上'], 550)
+        self.assertEqual(list(csv.DictReader(io.StringIO(result['result']['csv'])))[0]['売上'], '550')
         self.ctx.query_cache.clear()
         result = memory.recall(self.ctx, {'result_id': 'legacy_2_0', 'limit': 1})
         self.assertEqual(len(result['result']['sample_rows']), 1)
@@ -186,7 +190,7 @@ class MemoryTests(unittest.TestCase):
         restored = ToolContext(tools=Mock(), settings=self.settings)
         unpack(raw, restored)
         self.assertEqual(restored.context_state, self.ctx.context_state)
-        self.assertEqual(memory.recall(restored, {'result_id': self.rid, 'offset': 550, 'limit': 1})['result']['sample_rows'][0]['売上'], 550)
+        self.assertEqual(list(csv.DictReader(io.StringIO(memory.recall(restored, {'result_id': self.rid, 'offset': 550, 'limit': 1})['result']['csv'])))[0]['売上'], '550')
         changed = ToolContext(tools=Mock(), settings=SimpleNamespace(**{**vars(self.settings), 'gemini_model': 'different'}))
         unpack(raw, changed)
         self.assertEqual(changed.context_state, {})
@@ -216,7 +220,7 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(self.agent._generate.call_count, 3)
         request = self.agent._generate.call_args_list[2].args[0]
         recalled = request[4].parts[0].function_response.response
-        self.assertEqual(recalled['result']['sample_rows'], [{'売上': 550}])
+        self.assertEqual(list(csv.DictReader(io.StringIO(recalled['result']['csv']))), [{'売上': '550'}])
         self.assertEqual(recalled['statistics_scope'], 'returned_rows_only')
 
     def test_open_questions_close_and_only_latest_state_is_sent(self):

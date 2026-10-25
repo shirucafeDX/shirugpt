@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -36,8 +37,14 @@ from .sql_guard import SQLGuardError
 from .usage_log import UsageLogger
 from .execution import ExecutionControl, ExecutionStopped
 from . import context_memory, tool_catalog
+from .token_budget import BudgetPolicy, TokenBudgetManager, estimate_tokens, estimate_frame_tokens
+from .analysis_layer import analyze
+from .analysis_tools import declaration as analysis_declaration
+from .charts import validate_chart
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
 
 def _sql_key(sql: str) -> str:
     return hashlib.sha256(sql.strip().encode("utf-8")).hexdigest()
@@ -59,7 +66,11 @@ def tool_progress(call: Any) -> str:
         return f"データを取得・集計しています：{purpose}" if purpose else "データを取得・集計しています…"
     if call.name == "ask_clarification":
         return "確認する質問と選択肢を用意しています…"
+    if call.name == "analyze_result":
+        return f"取得済みデータを分析しています：{args.get('operation', '')}"
     if call.name == "recall_context":
+        if args.get("action") == "present":
+            return "取得済みデータからグラフを準備しています…"
         return "この会話の取得済みデータを確認しています…"
     if call.name == "finish_answer":
         return "回答を作成しています…"
@@ -77,6 +88,7 @@ class ToolContext:
     query_cache: dict[str, QueryRun] = field(default_factory=dict)
     context_state: dict[str, Any] = field(default_factory=dict)
     active_tool_names: list[str] = field(default_factory=list)
+    analysis_cache: dict[str, Any] = field(default_factory=dict)
     decisions: dict[str, str] = field(default_factory=dict)
     resume_calls: list[Any] | None = None
     execution_control: ExecutionControl | None = None
@@ -243,7 +255,7 @@ def build_declarations() -> list[types.FunctionDeclaration]:
             name="run_query",
             description=(
                 "読み取り専用の SELECT クエリを BigQuery で実行し、結果の要約"
-                "（行数・列と型・数値統計・先頭数行のサンプル）を返す。"
+                "（小さい結果はCSV、中・大規模結果は列情報・行数のみ）を返す。"
                 "全行データは返らない（ユーザーの画面には別途表示される）。"
                 "テーブルは必ずバッククォートで完全修飾すること。"
             ),
@@ -297,9 +309,21 @@ def build_declarations() -> list[types.FunctionDeclaration]:
                 "columns": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING)),
                 "offset": types.Schema(type=types.Type.INTEGER, description="開始行。既定0"),
                 "limit": types.Schema(type=types.Type.INTEGER, description="取得行数。既定20、最大100"),
+                "action": types.Schema(type=types.Type.STRING, enum=["read", "present"], description="既定read。presentは保存済み全結果をグラフ表示し、行データを再送しない。result_idとchartが必要"),
+                "filters": types.Schema(type=types.Type.ARRAY, max_items=5,
+                    items=types.Schema(type=types.Type.OBJECT, properties={
+                        "column": types.Schema(type=types.Type.STRING),
+                        "op": types.Schema(type=types.Type.STRING, enum=["eq", "in", "gte", "lte", "is_null", "not_null"]),
+                        "values": types.Schema(type=types.Type.ARRAY, max_items=20, items=types.Schema(type=types.Type.STRING), description="列の型に合わせた文字列。日付はISO形式。eq/gte/lteは1値、inは1〜20値。欠損判定は不要"),
+                    }, required=["column", "op"])),
                 "include_sql": types.Schema(type=types.Type.BOOLEAN, description="SQLも必要な場合のみtrue"),
             })),
     ])
+    by_name = {d.name: d for d in declarations}
+    by_name["recall_context"].parameters.properties["chart"] = by_name["run_query"].parameters.properties["chart"]
+    declarations.append(analysis_declaration(by_name["recall_context"].parameters.properties["filters"]))
+    by_name["run_query"].parameters.properties["result_mode"] = types.Schema(
+        type=types.Type.STRING, enum=["auto", "schema"], description="表示用で行データを読まない場合schema。autoも大きい結果は列・行数だけ返す")
     for declaration in declarations:
         declaration.parameters.properties["context_note"] = types.Schema(
             type=types.Type.OBJECT, description="これまでに読んだ結果の要点。要約用の別API呼び出しは不要。",
@@ -357,11 +381,16 @@ class GeminiAgent:
 
     def _generate(self, contents: list[types.Content], *, tool_names: list[str] | None = None):
         request = context_memory.ensure_user_ending(contents)
+        config = self._config(tool_names)
+        logger.info("analysis_metrics %s", json.dumps({"event": "llm_request",
+            "selected_tools": tool_names or [], "estimated_history_tokens": estimate_tokens([c.model_dump(exclude_none=True) for c in request]),
+            "estimated_system_tokens": estimate_tokens(config.system_instruction),
+            "estimated_tool_tokens": estimate_tokens([t.model_dump(exclude_none=True) for t in config.tools or []])}))
         try:
             return self.client.models.generate_content(
                 model=self.settings.gemini_model,
                 contents=request,
-                config=self._config(tool_names),
+                config=config,
             )
         except Exception:
             # 原因調査には構造だけを残す。質問・結果・SQL・署名の内容はログへ追加しない。
@@ -387,6 +416,9 @@ class GeminiAgent:
                 getattr(self.settings, "vertex_location", "global"),
             )
             ctx.session_gemini_cost_usd = ctx.gemini_cost_usd() + call_cost
+            logger.info("analysis_metrics %s", json.dumps({"event": "llm_call", "turn_id": ctx.turn_id,
+                "session_id": ctx.session_id, "selected_tools": ctx.active_tool_names, "model": model,
+                "input_tokens": prompt_tokens, "output_tokens": output_tokens, "llm_calls": 1}))
             ctx.turn_prompt_tokens += prompt_tokens
             ctx.turn_output_tokens += output_tokens
             ctx.turn_thinking_tokens += thinking_tokens
@@ -419,8 +451,18 @@ class GeminiAgent:
                 raise BQToolError(str(exc)) from exc
             ctx.active_tool_names = names
             return {"available_tools": names, "instruction": "次の生成のtoolsに、選択した詳細定義を渡します。使用中の定義を再選択する必要はありません。"}
+        if name == "analyze_result":
+            try:
+                return self._analyze_saved_result(ctx, args)
+            except (ValueError, TypeError, KeyError) as exc:
+                raise BQToolError(str(exc)) from exc
         if name == "recall_context":
             try:
+                action = args.get("action", "read")
+                if action == "present":
+                    return self._present_saved_result(ctx, args)
+                if action != "read":
+                    raise ValueError("actionはreadまたはpresentを指定してください。")
                 return context_memory.recall(ctx, args)
             except ValueError as exc:
                 raise BQToolError(str(exc)) from exc
@@ -498,6 +540,8 @@ class GeminiAgent:
         if not sql:
             raise BQToolError("sql が指定されていません。")
 
+        if args.get("result_mode", "auto") not in ("auto", "schema"):
+            raise BQToolError("result_modeはautoまたはschemaです。")
         key = _sql_key(sql)
         result_role = str(args.get("result_role", "answer"))
         if result_role not in ("supporting", "answer"):
@@ -509,7 +553,7 @@ class GeminiAgent:
             # 図表だけを求める追質問にも対応する。履歴内の結果は書き換えない。
             ctx.turn_runs = [r for r in ctx.turn_runs if _sql_key(r.original_sql) != key]
             ctx.turn_runs.append(replace(run, result_role=result_role, chart=args.get("chart", run.chart)))
-            payload = self._query_payload(run)
+            payload = self._query_payload(run, result_mode=args.get("result_mode", "auto"))
             payload["cached"] = True
             return payload
 
@@ -543,23 +587,49 @@ class GeminiAgent:
                 turn_id=ctx.turn_id,
                 billed_bytes=run.billed_bytes,
             )
-        return self._query_payload(run)
+        return self._query_payload(run, result_mode=args.get("result_mode", "auto"))
 
-    @staticmethod
-    def _query_payload(run: QueryRun) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "executed_sql": run.sql,
-            "bytes_processed": human_bytes(run.estimated_bytes),
-            "result": run.summary,
-        }
-        if run.notes:
-            payload["notes"] = run.notes
-        return payload
+    def _query_payload(self, run: QueryRun, result_mode="auto") -> dict[str, Any]:
+        if result_mode not in ("auto", "schema"):
+            raise BQToolError("result_modeはautoまたはschemaです。")
+        manager = TokenBudgetManager(BudgetPolicy.from_settings(self.settings))
+        result = manager.initial_result(run.dataframe, truncated=run.truncated, schema_only=result_mode == "schema")
+        return {"executed_sql": run.sql, "bytes_processed": human_bytes(run.estimated_bytes),
+                "result": result, **({"notes": run.notes} if run.notes else {})}
+
+    def _analyze_saved_result(self, ctx, args):
+        source = context_memory.saved_result(ctx, args.get("result_id"))
+        payload, frame = analyze(source.dataframe, args, BudgetPolicy.from_settings(self.settings),
+                                 truncated=source.truncated, control=ctx.execution_control, return_frame=True)
+        rid = context_memory.result_id_for("analyze_result", args)
+        derived_truncated = source.truncated or bool(payload["result"].get("more_rows"))
+        ctx.analysis_cache[rid] = {"dataframe": frame, "source_truncated": derived_truncated,
+                                   "source_result_id": args["result_id"], "notes": source.notes}
+        payload["estimated_tokens_before"] = estimate_frame_tokens(source.dataframe)
+        return {"source_result_id": args["result_id"], **payload}
+
+    def _present_saved_result(self, ctx: ToolContext, args: dict) -> dict:
+        if not args.get("result_id") or any(args.get(k) for k in ("turn_id", "search", "columns", "filters", "offset", "limit", "include_sql")):
+            raise ValueError("presentはresult_idとchartだけで保存済み全結果を表示します。絞り込みはreadで行ってください。")
+        record = context_memory.state_for(ctx)["results"].get(args["result_id"], {})
+        run = ctx.query_cache.get(record.get("query_key"))
+        if run is None:
+            raise ValueError("この会話に表示可能な保存済み全結果がありません。")
+        chart = args.get("chart")
+        if validate_chart(run.dataframe, chart) is None:
+            raise ValueError("保存済み結果の列名と型に合うchartを指定してください。")
+        key = _sql_key(run.original_sql)
+        ctx.turn_runs = [r for r in ctx.turn_runs if _sql_key(r.original_sql) != key]
+        ctx.turn_runs.append(replace(run, chart=dict(chart), result_role="answer"))
+        return {"source_result_id": args["result_id"], "presented": True, "chart": chart,
+                "row_count": len(run.dataframe), "source_truncated": run.truncated,
+                "note": "保存済み全結果を画面に表示。BigQuery再実行・行データ再送なし。"}
 
     def _dispatch(self, call: Any, ctx: ToolContext) -> types.Part:
         name = call.name
         args = dict(call.args or {})
 
+        started = time.monotonic()
         try:
             payload = self._call_tool(name, args, ctx)
         except ExecutionStopped:
@@ -601,6 +671,27 @@ class GeminiAgent:
                     error_text=technical_detail(exc, limit=10_000),
                 )
 
+        result = payload.get("result", {})
+        source_rows = payload.get("source_row_count", result.get("row_count", 0)) if isinstance(result, dict) else 0
+        event = {"event": "agent_tool", "session_id": ctx.session_id, "turn_id": ctx.turn_id,
+                 "tool": name, "selected_tools": list(ctx.active_tool_names),
+                 "original_query": (context_memory.state_for(ctx)["turns"][-1].get("question", "") if context_memory.state_for(ctx)["turns"] else ""),
+                 "generated_sql": args.get("sql"), "analysis_operation": args.get("operation"),
+                 "seconds": round(time.monotonic() - started, 6), "rows_before": source_rows,
+                 "rows_after": result.get("sent_row_count", 0) if isinstance(result, dict) else 0,
+                 "estimated_tokens_after": estimate_tokens(payload), "error": bool(payload.get("error"))}
+        if name == "run_query":
+            source = ctx.query_cache.get(_sql_key(str(args.get("sql", ""))))
+            if source is not None:
+                event["estimated_tokens_before"] = estimate_frame_tokens(source.dataframe)
+                event["sql_execution_seconds"] = source.execution_seconds
+                event["executed_sql"] = source.sql
+        elif isinstance(result, dict):
+            event["estimated_tokens_before"] = payload.get("estimated_tokens_before", result.get("estimated_tokens_before"))
+        logger.info("analysis_metrics %s", json.dumps(event, ensure_ascii=False, default=str))
+        state = context_memory.state_for(ctx)
+        state.setdefault("analysis_events", []).append(event)
+        state["analysis_events"] = state["analysis_events"][-100:]
         if not payload.get("error") and name != tool_catalog.SELECT_TOOL:
             warning = context_memory.accept_note(ctx, args.get("context_note"))
             if warning:

@@ -162,7 +162,8 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(len(result.dataframe), 24)
 
     def test_cached_chart_spec_can_change_without_mutating_previous_answer_or_requerying(self):
-        settings = Mock()
+        from src.token_budget import BudgetPolicy
+        settings = Mock(sample_rows=500, **vars(BudgetPolicy()))
         ctx = ToolContext(tools=Mock(), settings=settings)
         result = run(categories())
         ctx.tools.run_query.return_value = result

@@ -61,7 +61,9 @@ class PromptTests(unittest.TestCase):
                        'source_truncated', '新しいBigQuery照会ではない', 'DU_id', '9時間を加算しない'):
             self.assertIn(phrase, prompt)
         self.assertNotIn('## SQL を書くときの規則', prompt)
-        self.assertNotIn('## 図表と回答用クエリ', prompt)
+        self.assertIn('action="present"', prompt)
+        self.assertIn('filters', prompt)
+        self.assertIn('## 図表と回答用クエリ', prompt)
 
     def test_schema_and_listing_have_only_their_lookup_guidance(self):
         listing = self.prompt(['list_datasets', 'list_tables', 'get_table_schema'])

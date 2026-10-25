@@ -9,9 +9,10 @@ TOOL_SUMMARIES = {
     "list_datasets": "利用できるデータセットを確認する。",
     "list_tables": "データセット内のテーブル名を確認する。",
     "get_table_schema": "1テーブルの列・型・説明を確認する。",
-    "run_query": "読み取り専用SQLで必要範囲を取得・集計。",
+    "run_query": "読み取り専用SQLで必要範囲を取得・集計。大きい結果は列情報だけ返す。",
+    "analyze_result": "保存済み表を統計・集計・Top-K・比較・相関・外れ値・時系列・ローカルSQLで分析する。",
     "ask_clarification": "ユーザーに選択式の確認質問をする。",
-    "recall_context": "この会話の保存済み結果・過去の詳細を参照する。",
+    "recall_context": "この会話の保存済み結果・過去の詳細を参照し、取得済みデータを図示する。",
     "finish_answer": "最終回答と要点・累積要約を返して終了する。",
 }
 

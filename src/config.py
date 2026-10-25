@@ -85,6 +85,14 @@ class Settings:
     admin_emails: tuple[str, ...]
     admin_allow_local: bool
     chat_history_bucket: str = ""
+    max_direct_rows: int = 100
+    max_preview_rows: int = 50
+    medium_result_rows: int = 1000
+    max_data_tokens: int = 8000
+    target_data_tokens: int = 4000
+    max_history_tokens: int = 16000
+    analysis_timeout_seconds: int = 3
+    bq_query_timeout_seconds: int = 120
 
     def is_dataset_allowed(self, dataset: str) -> bool:
         return dataset in self.allowed_datasets
@@ -161,6 +169,15 @@ def load_settings() -> Settings:
             "利用ログが Gemini からアクセス可能になります。"
         )
 
+    from .token_budget import BudgetPolicy
+    try:
+        analysis_policy = BudgetPolicy(**{name: _int(name.upper(), field.default)
+                                         for name, field in BudgetPolicy.__dataclass_fields__.items()})
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    bq_timeout = _int("BQ_QUERY_TIMEOUT_SECONDS", 120)
+    if bq_timeout < 1:
+        raise ConfigError("BQ_QUERY_TIMEOUT_SECONDSは1以上で指定してください。")
     return Settings(
         gcp_project=project,
         bq_location=_str("BQ_LOCATION") or None,
@@ -183,6 +200,8 @@ def load_settings() -> Settings:
         admin_emails=_csv("ADMIN_EMAILS"),
         admin_allow_local=_bool("ADMIN_ALLOW_LOCAL"),
         chat_history_bucket=_str("CHAT_HISTORY_BUCKET"),
+        bq_query_timeout_seconds=bq_timeout,
+        **vars(analysis_policy),
     )
 
 
