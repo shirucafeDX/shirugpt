@@ -128,7 +128,7 @@ export default function ({ data, parentElement, setTriggerValue }) {
       button.id = `${id}-${i}`;
       button.setAttribute("role", "option");
       const name = document.createElement("strong");
-      name.textContent = item.command + (effortOpen && item.mode === data.effort ? " ✓" : "");
+      name.textContent = (effortOpen ? `${i + 1}. ` : "") + item.command + (effortOpen && item.mode === data.effort ? " ✓" : "");
       const description = document.createElement("span");
       description.textContent = item.description;
       button.append(name, description);
@@ -138,7 +138,7 @@ export default function ({ data, parentElement, setTriggerValue }) {
       menu.appendChild(button);
     });
     const hint = document.createElement("footer");
-    hint.textContent = "↑↓で選択 · Enterで確定 · Escで閉じる";
+    hint.textContent = effortOpen ? "1〜3で即確定 · ↑↓とEnterでも選択 · Escで閉じる" : "↑↓で選択 · Enterで確定 · Escで閉じる";
     menu.appendChild(hint);
     menu.hidden = false;
     input.setAttribute("aria-expanded", "true");
@@ -148,6 +148,15 @@ export default function ({ data, parentElement, setTriggerValue }) {
 
   function keydown(event) {
     const editing = event.target instanceof Element && event.target.closest('input, textarea, [contenteditable="true"]');
+    if (effortOpen && !menu.hidden && /^[1-3]$/.test(event.key)
+        && (!editing || event.target === input || menu.contains(event.target))
+        && !event.isComposing && event.keyCode !== 229
+        && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      complete(Number(event.key) - 1);
+      return;
+    }
     if (!editing && !effortOpen && questionPanel && !event.isComposing && event.keyCode !== 229
         && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
       const buttons = [...questionPanel.querySelectorAll('[class*="_option_"] button:not(:disabled)')];

@@ -1,5 +1,8 @@
 """/effortの選択・解除、ローカル処理、Highの入力欄表示を確認する。"""
 import unittest
+from pathlib import Path
+import shutil
+import subprocess
 
 from streamlit.testing.v1 import AppTest
 
@@ -98,3 +101,10 @@ _keyboard_event()
         self.assertFalse(app.exception)
         self.assertEqual(app.session_state['keyboard_effort'], 'high')
         self.assertNotIn('effort_panel', app.session_state)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.jsがないためキーボードの単体テストをスキップ')
+    def test_effort_digits_modifiers_ime_arrow_enter_and_escape(self):
+        result = subprocess.run([shutil.which('node'), str(Path(__file__).with_name('command_menu_keyboard.mjs'))],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('effort keyboard checks passed', result.stdout)
