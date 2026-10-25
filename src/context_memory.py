@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from typing import Any
 
 from google.genai import types
+
+logger = logging.getLogger(__name__)
 
 RECENT_TURNS = 2
 NOTE_CHARS = 1200
@@ -240,10 +243,62 @@ def catalogue(state: dict, ids: list[str]) -> list[dict]:
     return items
 
 
+def ensure_user_ending(contents: list[types.Content]) -> list[types.Content]:
+    """送信時だけ末尾を補正する。署名付きPart・保存原本・ツールの実行状態は変更しない。"""
+    request = list(contents)
+    # Vertexではfunction_responseの後ろにtextを並べると、role=userでも
+    # model末尾と解釈される場合がある。補助説明は応答JSONへ入れてPartを分けない。
+    for index, content in enumerate(request):
+        parts = content.parts or []
+        responses = [i for i, part in enumerate(parts) if part.function_response is not None]
+        texts = [part.text for part in parts if part.text is not None]
+        if content.role != "user" or not responses or not texts:
+            continue
+        last_response = responses[-1]
+        response = parts[last_response].function_response
+        payload = dict(response.response or {})
+        payload["context_text"] = [*payload.get("context_text", []), *texts]
+        replacement = parts[last_response].model_copy(update={
+            "function_response": response.model_copy(update={"response": payload})})
+        request[index] = content.model_copy(update={"parts": [
+            replacement if i == last_response else part for i, part in enumerate(parts) if part.text is None]})
+        logger.warning("Gemini送信会話のツール応答とtextの混在を補正しました。")
+    # APIは空の末尾を無視する。空のuserを置くだけではmodel末尾のエラーを回避できない。
+    while request and not any(
+        (part.text and part.text.strip() and not part.thought)
+        or part.function_call is not None or part.function_response is not None
+        or part.inline_data is not None or part.file_data is not None
+        for part in request[-1].parts or []
+    ):
+        request.pop()
+    if not request:
+        raise ValueError("送信する質問がありません。質問を入力してください。")
+    if request[-1].role == "user":
+        return request
+    if request[-1].role != "model":
+        raise ValueError("会話末尾のroleはuserまたはmodelである必要があります。")
+    calls = [part.function_call for part in request[-1].parts or [] if part.function_call]
+    if calls:
+        # 応答が欠けた呼び出しを勝手に再実行せず、不明な状態を明示する。
+        parts = []
+        for call in calls:
+            part = types.Part.from_function_response(name=call.name, response={
+                "error": "前回のツール呼び出しの応答が履歴に残っていません。実行の成否は未確認です。保存済み結果を先に確認し、必要なら再度呼び出してください。",
+                "status": "response_missing",
+            })
+            part.function_response.id = call.id
+            parts.append(part)
+    else:
+        parts = [types.Part.from_text(text="直前のユーザーの依頼への回答を続けてください。すでに得られた結果と確定した条件を使い、未確認の点は推測しないでください。")]
+    request.append(types.Content(role="user", parts=parts))
+    logger.warning("Gemini送信会話のmodel末尾を補正しました（未応答のツール呼び出し数: %d）。", len(calls))
+    return request
+
+
 def build_request(contents, ctx) -> list[types.Content]:
     current = sync_turns(contents, ctx)
     if not current:
-        return list(contents)
+        return ensure_user_ending(contents)
     state = state_for(ctx)
     past = [turn for turn in state["turns"] if turn["start"] < current["start"]]
     older, recent = past[:-RECENT_TURNS], past[-RECENT_TURNS:]
@@ -286,12 +341,19 @@ def build_request(contents, ctx) -> list[types.Content]:
             else:
                 parts.append(part)
         request.append(content.model_copy(update={"parts": parts}) if changed else content)
+    request = ensure_user_ending(request)
     if state["questions"]:
-        status_part = types.Part.from_text(text=encoded(active_questions(state)))
-        if request and request[-1].role == "user":
-            request[-1] = request[-1].model_copy(update={"parts": [*(request[-1].parts or []), status_part]})
+        status = active_questions(state)
+        parts = list(request[-1].parts or [])
+        responses = [i for i, part in enumerate(parts) if part.function_response is not None]
+        if responses:
+            index = responses[-1]
+            response = parts[index].function_response
+            parts[index] = parts[index].model_copy(update={"function_response": response.model_copy(
+                update={"response": {**(response.response or {}), "current_question_state": status}})})
         else:
-            request.append(types.Content(role="user", parts=[status_part]))
+            parts.append(types.Part.from_text(text=encoded(status)))
+        request[-1] = request[-1].model_copy(update={"parts": parts})
     # 署名付きmodel Part / functionCallは、現在のターン内では一切変更しない。
     state["last_request"] = {"original_chars": len(encoded([c.model_dump(exclude_none=True) for c in contents])),
                              "sent_chars": len(encoded([c.model_dump(exclude_none=True) for c in request])),

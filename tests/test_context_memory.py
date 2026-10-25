@@ -335,7 +335,7 @@ class MemoryTests(unittest.TestCase):
         last = self.agent._generate.call_args_list[2].args[0]
         self.assertEqual(last[1].parts[0].thought_signature, b'original-signature')
         self.assertEqual(last[1].parts[0].function_call.args['context_note']['open_questions'], opened['open_questions'])
-        self.assertEqual(json.loads(last[-1].parts[-1].text)['open_questions'], [])
+        self.assertEqual(last[-1].parts[-1].function_response.response['current_question_state']['open_questions'], [])
 
     def test_closed_state_and_conclusion_survive_finish_and_history_roundtrip(self):
         opened = self.note([], '- 期間を確認。')

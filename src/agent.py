@@ -194,7 +194,8 @@ SYSTEM_INSTRUCTION += """
   同じ疑問には同じidを使い、既存の事項を毎回転載する必要はない。変更がなければ空配列にする（既存事項は保持される）。
   根拠となる結果やユーザーの回答から解決したらresolved_questionsに{id,conclusion}を入れて閉じ、結論を事実として残す。
   新しい結果を読むたびに、登録中の疑問が解決したかを確認する。解決した疑問を別idで再登録しない。
-  リクエスト末尾のopen_questionsが現在の全件一覧。過去の呼び出し・メモ・原本にある疑問は歴史的な記録であり、
+  最新の全件一覧は、末尾のツール応答JSONのcurrent_question_state.open_questionsを参照する。
+  通常のユーザー入力では補足のopen_questionsを参照する。過去の呼び出し・メモ・原本にある疑問は歴史的な記録であり、
   最新一覧にない事項を未解決として扱わない。解決判定はあなたが行い、アプリはその更新を一覧に反映する。
 - finish_answerとask_clarificationはそれぞれ単独で呼ぶ。
 """
@@ -514,11 +515,20 @@ class GeminiAgent:
         return types.GenerateContentConfig(**kwargs)
 
     def _generate(self, contents: list[types.Content]):
-        return self.client.models.generate_content(
-            model=self.settings.gemini_model,
-            contents=contents,
-            config=self._config(),
-        )
+        request = context_memory.ensure_user_ending(contents)
+        try:
+            return self.client.models.generate_content(
+                model=self.settings.gemini_model,
+                contents=request,
+                config=self._config(),
+            )
+        except Exception:
+            # 原因調査には構造だけを残す。質問・結果・SQL・署名の内容はログへ追加しない。
+            part_kinds = [[key for key in ("text", "function_call", "function_response", "inline_data", "file_data")
+                           if getattr(part, key, None) is not None] for part in request[-1].parts or []]
+            logger.warning("Gemini送信失敗: contents=%d, last_roles=%s, last_part_kinds=%s",
+                           len(request), [c.role for c in request[-12:]], part_kinds)
+            raise
 
     def _record_usage(self, ctx, response, model):
         usage = response.usage_metadata
