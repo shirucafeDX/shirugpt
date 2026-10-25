@@ -14,6 +14,7 @@ def declaration(filters):
         parameters=types.Schema(type=types.Type.OBJECT, properties={
             'result_id': string('この会話の取得済み結果ID'),
             'operation': string(enum=list(OPERATIONS)),
+            'purpose': string('何を確認する分析か、日本語で短く説明する。実行詳細に表示'),
             'columns': strings('出力列またはdescribe/correlationの対象列。相関は2〜6列'),
             'filters': filters,
             'group_by': strings('集計・比較・時系列の内訳列', 6),

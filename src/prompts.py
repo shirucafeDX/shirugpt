@@ -164,6 +164,7 @@ RECALL_INSTRUCTION = """## 保存済み結果の参照
 
 ANALYSIS_INSTRUCTION = """## 保存済み表の段階的分析
 Do not move data to the LLM when computation can be moved to the data.
+- purposeには何を確認する分析かを短い日本語で指定する。実行詳細に表示する。
 - analyze_resultはこの会話のresult_idだけを対象にし、BigQuery再照会や追加の要約用LLM呼び出しはしない。
   get_schema/get_row_countで列・行数、describe_dataで基本統計を確認する。推測した列名を使わない。
 - 「面白い傾向」「自由に分析」なら、関連schema → describe_data → カテゴリ分布/数値分布 →

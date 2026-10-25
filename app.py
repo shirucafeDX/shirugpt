@@ -525,7 +525,8 @@ def render_chart(df, spec: ChartSpec, key_prefix: str) -> None:
 
 def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> None:
     runs = message.get("runs") or []
-    if not runs:
+    analyses = message.get("analyses") or []
+    if not runs and not analyses:
         return
     plan = choose_presentation(message.get("question", ""), runs, shown)
     if message.get("is_error") or message.get("is_stopped"):
@@ -554,6 +555,51 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
                 st.caption(f"実行クエリ量: {human_bytes(run.billed_bytes)} · 結果件数: {len(run.dataframe):,} 件")
                 for note in run.notes:
                     st.caption(f"ℹ️ {note}")
+        for idx, analysis in enumerate(analyses):
+            render_analysis_detail(analysis, idx, msg_idx)
+
+
+ANALYSIS_LABELS = {
+    "get_schema": "列・型の確認", "get_row_count": "行数の確認", "describe_data": "基本統計",
+    "aggregate": "グループ別集計", "top_k": "上位・下位の抽出", "filter_data": "条件による絞り込み",
+    "compare_groups": "グループ間の比較", "correlation": "相関分析", "detect_outliers": "外れ値候補の検出",
+    "analyze_timeseries": "時系列分析", "get_distinct_values": "値ごとの分布", "sample_data": "サンプル抽出",
+    "sql": "保存済み結果へのSQL分析",
+}
+
+
+def render_analysis_detail(analysis: dict, idx: int, msg_idx: int) -> None:
+    label = ANALYSIS_LABELS.get(analysis.get("operation"), "データ分析")
+    with st.expander(f"分析：{analysis.get('purpose') or label}"):
+        st.caption(f"分析方法：{label}")
+        parameters = analysis.get("parameters") or {}
+        labels = {"columns": "対象列", "group_by": "集計軸", "metric": "指標", "aggregation": "集計方法",
+                  "aggregations": "指標・集計関数", "sort_by": "並べ替え列", "ascending": "昇順",
+                  "absolute": "絶対値で比較", "baseline": "比較基準", "method": "計算方法",
+                  "time_column": "日時列", "frequency": "期間単位", "window": "移動平均の期間数",
+                  "view": "抽出する変化", "limit": "AIへの返却行数指定", "offset": "開始行", "filters": "抽出条件"}
+        for key, name in labels.items():
+            if key in parameters:
+                st.write(f"**{name}**", parameters[key])
+        if parameters.get("sql"):
+            st.code(parameters["sql"], language="sql")
+        if analysis.get("error"):
+            st.warning(analysis["error"])
+            return
+        frame = analysis.get("dataframe")
+        if frame is not None:
+            st.caption(f"分析元: {analysis.get('source_row_count', 0):,} 行 · 条件一致: {analysis.get('matched_row_count', 0):,} 行 · 分析結果: {len(frame):,} 行 · AIへの返却: {analysis.get('sent_row_count', 0):,} 行")
+            if frame.empty:
+                st.info("該当する分析結果はありませんでした。")
+            else:
+                st.dataframe(frame, hide_index=True)
+                st.download_button("分析結果をCSVでダウンロード", frame.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"analysis_{msg_idx}_{idx}.csv", mime="text/csv", key=f"analysis_csv_{msg_idx}_{idx}")
+        st.caption(f"分析時間: {analysis.get('analysis_seconds', 0):.3f} 秒")
+        if analysis.get("source_truncated"):
+            st.caption("分析対象は保存済みの範囲に限定されています。元の結果に切り捨てがあります。")
+        for note in analysis.get("notes", []):
+            st.caption(f"ℹ️ {note}")
 
 
 def render_message(message: dict[str, Any], msg_idx: int, shown: set[str] | None = None) -> None:
@@ -683,7 +729,7 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
                     "role": "assistant",
                     "text": result.text,
                     "question": question,
-                    "runs": list(ctx.turn_runs),
+                    "runs": list(ctx.turn_runs), "analyses": list(getattr(ctx, "turn_analyses", [])),
                     "errors": list(ctx.turn_errors),
                     **({"clarification": {
                         "options": result.options, "selection_mode": result.selection_mode,
@@ -717,7 +763,7 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
         contents.append(types.Content(role="model", parts=[types.Part.from_text(text=text)]))
         st.session_state.messages.append({
             "role": "assistant", "text": text, "question": question,
-            "runs": list(ctx.turn_runs), "errors": list(ctx.turn_errors), "is_stopped": True,
+            "runs": list(ctx.turn_runs), "analyses": list(getattr(ctx, "turn_analyses", [])), "errors": list(ctx.turn_errors), "is_stopped": True,
         })
     except Exception as exc:  # noqa: BLE001 - ユーザーには整形して見せる
         detail = technical_detail(exc, limit=10_000)
@@ -739,7 +785,7 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
                 "role": "assistant",
                 "text": friendly_error(exc),
                 "question": question,
-                "runs": list(ctx.turn_runs),
+                "runs": list(ctx.turn_runs), "analyses": list(getattr(ctx, "turn_analyses", [])),
                 "errors": list(ctx.turn_errors),
                 "is_error": True,
             }
@@ -912,7 +958,7 @@ def render_prompt_input(ctx: ToolContext, *, running: bool = False) -> str | Non
 }
 </style>
 """.replace("__COLOR__", color), unsafe_allow_html=True)
-    prompt = st.chat_input("処理中…" if running else "質問、または /help などのコマンドを入力", key="prompt_input", disabled=running)
+    prompt = st.chat_input("処理中…" if running else "ShiruGPT に聞く", key="prompt_input", disabled=running)
     render_command_menu(effort_open=bool(st.session_state.get("effort_panel")) and not running,
                         effort=getattr(ctx, "thinking_mode", "medium"), running=running)
     return st.session_state.pop("keyboard_command", None) or prompt

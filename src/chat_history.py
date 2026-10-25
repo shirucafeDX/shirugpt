@@ -21,7 +21,7 @@ from .tool_catalog import restored_selection
 # 実行時オブジェクト、認証情報、月次利用量のベースラインは保存しない。
 CONTEXT_FIELDS = (
     'active_tool_names', 'analysis_cache', 'context_state', 'schema_cache', 'listing_cache', 'query_cache', 'decisions', 'resume_calls',
-    'turn_runs', 'turn_errors', 'turn_prompt_tokens', 'turn_output_tokens',
+    'turn_runs', 'turn_analyses', 'turn_errors', 'turn_prompt_tokens', 'turn_output_tokens',
     'turn_thinking_tokens', 'turn_total_tokens', 'session_prompt_tokens',
     'session_output_tokens', 'session_total_tokens', 'session_billed_bytes',
     'session_thinking_tokens',

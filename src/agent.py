@@ -99,6 +99,7 @@ class ToolContext:
 
     # 直近ターンの記録（UI 表示用）
     turn_runs: list[QueryRun] = field(default_factory=list)
+    turn_analyses: list[dict[str, Any]] = field(default_factory=list)
     turn_errors: list[str] = field(default_factory=list)
     turn_prompt_tokens: int = 0
     turn_output_tokens: int = 0
@@ -137,6 +138,7 @@ class ToolContext:
 
     def start_turn(self) -> None:
         self.turn_runs = []
+        self.turn_analyses = []
         self.turn_errors = []
         self.turn_prompt_tokens = 0
         self.turn_output_tokens = 0
@@ -606,6 +608,16 @@ class GeminiAgent:
         ctx.analysis_cache[rid] = {"dataframe": frame, "source_truncated": derived_truncated,
                                    "source_result_id": args["result_id"], "notes": source.notes}
         payload["estimated_tokens_before"] = estimate_frame_tokens(source.dataframe)
+        ctx.turn_analyses.append({
+            "result_id": rid, "source_result_id": args["result_id"], "operation": args["operation"],
+            "purpose": str(args.get("purpose") or ""),
+            "parameters": {key: value for key, value in args.items() if key not in ("result_id", "operation", "context_note", "purpose")},
+            "dataframe": frame, "source_row_count": payload["source_row_count"],
+            "matched_row_count": payload["matched_row_count"],
+            "sent_row_count": payload["result"].get("sent_row_count", 0),
+            "source_truncated": derived_truncated, "analysis_seconds": payload["analysis_seconds"],
+            "notes": list(source.notes),
+        })
         return {"source_result_id": args["result_id"], **payload}
 
     def _present_saved_result(self, ctx: ToolContext, args: dict) -> dict:
@@ -671,6 +683,10 @@ class GeminiAgent:
                     error_text=technical_detail(exc, limit=10_000),
                 )
 
+        if name == "analyze_result" and payload.get("error"):
+            ctx.turn_analyses.append({"operation": args.get("operation", ""), "purpose": str(args.get("purpose") or ""),
+                "parameters": {key: value for key, value in args.items() if key not in ("result_id", "operation", "context_note", "purpose")},
+                "error": payload["error"]})
         result = payload.get("result", {})
         source_rows = payload.get("source_row_count", result.get("row_count", 0)) if isinstance(result, dict) else 0
         event = {"event": "agent_tool", "session_id": ctx.session_id, "turn_id": ctx.turn_id,
