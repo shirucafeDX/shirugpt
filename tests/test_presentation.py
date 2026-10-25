@@ -223,11 +223,27 @@ render_message({{'role':'assistant','text':'回答です','question':{question!r
 
     def test_scalar_has_only_collapsed_data_and_details(self):
         app = self.render('件数は？', scalar=True)
-        self.assertEqual([e.label for e in app.expander], ['データ・実行詳細'])
+        self.assertEqual([e.label for e in app.expander], ['データ・実行詳細', 'クエリ 1'])
         self.assertTrue(all(not e.proto.expanded for e in app.expander))
         self.assertEqual(len(app.expander[0].dataframe), 1)
         self.assertEqual(app.expander[0].code[0].value, 'SELECT 1')
         self.assertEqual(len(app.selectbox), 0)
+
+    def test_query_descriptions_are_separate_collapsed_details(self):
+        app = AppTest.from_string("""
+import pandas as pd
+from src.bq_tools import QueryRun
+from app import render_results
+frame = pd.DataFrame({'件数': [5]})
+runs = [QueryRun('SELECT 1','SELECT 1',0,0,frame,{},purpose='件数を確認'),
+        QueryRun('SELECT 2','SELECT 2',0,0,frame,{},purpose='条件を検証')]
+render_results({'question':'件数は？', 'runs':runs}, 0, set())
+""").run(timeout=20)
+        self.assertFalse(app.exception)
+        self.assertEqual([e.label for e in app.expander], ['データ・実行詳細', '件数を確認', '条件を検証'])
+        self.assertTrue(all(not e.proto.expanded for e in app.expander))
+        self.assertEqual(app.expander[1].code[0].value, 'SELECT 1')
+        self.assertEqual(app.expander[2].code[0].value, 'SELECT 2')
 
     def test_chart_has_no_manual_type_or_axis_controls(self):
         app = self.render('店舗別の比較')
@@ -238,7 +254,7 @@ render_message({{'role':'assistant','text':'回答です','question':{question!r
     def test_explicit_table_is_visible_without_data_expander(self):
         app = self.render('一覧にして')
         self.assertEqual(len(app.dataframe), 1)
-        self.assertEqual([e.label for e in app.expander], ['データ・実行詳細'])
+        self.assertEqual([e.label for e in app.expander], ['データ・実行詳細', 'クエリ 1'])
         self.assertEqual(len(app.expander[0].dataframe), 0)
         self.assertEqual(app.expander[0].code[0].value, 'SELECT 1')
         self.assertEqual(len(app.selectbox), 0)

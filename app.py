@@ -542,18 +542,16 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
     # 回答に使った結果と途中結果を、必要なときだけ確認できるようにする。
     with st.expander("データ・実行詳細"):
         for idx, run in enumerate(runs):
-            if idx:
-                st.divider()
-            st.caption(run.purpose or f"クエリ {idx + 1}")
-            if not (plan.mode == "table" and idx == plan.index):
-                if run.dataframe.empty:
-                    st.info("このクエリの結果は 0 件でした。")
-                else:
-                    render_table(run, idx, msg_idx)
-            st.code(run.sql, language="sql")
-            st.caption(f"実行クエリ量: {human_bytes(run.billed_bytes)} · 結果件数: {len(run.dataframe):,} 件")
-            for note in run.notes:
-                st.caption(f"ℹ️ {note}")
+            with st.expander(run.purpose or f"クエリ {idx + 1}"):
+                if not (plan.mode == "table" and idx == plan.index):
+                    if run.dataframe.empty:
+                        st.info("このクエリの結果は 0 件でした。")
+                    else:
+                        render_table(run, idx, msg_idx)
+                st.code(run.sql, language="sql")
+                st.caption(f"実行クエリ量: {human_bytes(run.billed_bytes)} · 結果件数: {len(run.dataframe):,} 件")
+                for note in run.notes:
+                    st.caption(f"ℹ️ {note}")
 
 
 def render_message(message: dict[str, Any], msg_idx: int, shown: set[str] | None = None) -> None:
