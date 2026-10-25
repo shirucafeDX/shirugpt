@@ -217,8 +217,16 @@ cp .env.example .env
 | `MAX_BYTES_BILLED` | `10737418240`（10GB） | BigQuery に渡す課金上限。超えるクエリは BigQuery 側で失敗 |
 | `DEFAULT_ROW_LIMIT` | `1000` | 外側に `LIMIT` が無い場合に自動付与する行数 |
 | `MAX_RESULT_ROWS` | `5000` | UI に読み込む最大行数（メモリ保護） |
-| `SAMPLE_ROWS` | `500` | Gemini に渡す先頭のサンプル行数 |
-| `MAX_TOOL_ITERATIONS` | `12` | 1 ターンあたりの tool 呼び出しループ上限 |
+| `SAMPLE_ROWS` | `500` | 旧形式の履歴保存用サンプル上限。現在の直接返却上限とは別 |
+| `MAX_DIRECT_ROWS` | `100` | 推定データ予算内でCSVを直接返す行数上限 |
+| `MAX_PREVIEW_ROWS` | `50` | 分析結果・詳細参照の返却行数上限 |
+| `MEDIUM_RESULT_ROWS` | `1000` | 中規模と大規模の分類境界 |
+| `MAX_DATA_TOKENS` | `8000` | データ返却の推定トークン上限 |
+| `TARGET_DATA_TOKENS` | `4000` | 縮小時の推定トークン目標 |
+| `MAX_HISTORY_TOKENS` | `16000` | 会話履歴の推定トークン上限 |
+| `ANALYSIS_TIMEOUT_SECONDS` | `3` | ローカルSQLと分析の時間確認 |
+| `BQ_QUERY_TIMEOUT_SECONDS` | `120` | BigQuery結果待機の上限（秒） |
+| `MAX_TOOL_ITERATIONS` | `50` | 1 ターンあたりの tool 呼び出しループ上限 |
 | `BQ_LOG_DATASET` | （空） | 利用ログの記録先データセット。空で機能オフ。**allowlist に含めない** |
 | `BQ_LOG_TABLE` | `usage_events` | 利用ログのテーブル名 |
 | `BQ_LIMIT_TABLE` | `user_limits` | 月次使用制限のテーブル名（`BQ_LOG_DATASET` と同じデータセット内） |

@@ -1,7 +1,7 @@
-"""クエリ結果の DataFrame を、Gemini に渡すための小さな要約に落とす。
+"""取得結果の保存用統計・旧形式の履歴サンプルを作る。
 
-生データは Gemini には渡さない（トークン節約とデータ最小化のため）。
-フルの結果は Streamlit 側で DataFrame として直接表示する。
+現在のモデル向け返却はtoken_budgetとAnalysis Layerで別に制御する。
+画面用のDataFrameはそのまま保持する。
 """
 
 from __future__ import annotations
