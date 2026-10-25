@@ -34,7 +34,7 @@ from src.bq_tools import (
 )
 from src.charts import ChartSpec, special_chart_spec
 from src.execution import BackgroundTurn, ExecutionStopped
-from src.commands import HELP, parse_command, usage_text, current_month_usage_text
+from src.commands import HELP, parse_command, usage_text, usage_details_text
 from src.command_menu import render_command_menu
 from src.presentation import choose_presentation
 from src.config import (
@@ -931,10 +931,10 @@ def handle_command(prompt, ctx, settings, tools, usage_logger, user_email,
         )
         if user_email and getattr(settings, "logging_enabled", False):
             try:
-                output += current_month_usage_text(usage_logger.current_month_details(user_email))
+                output += usage_details_text(usage_logger.usage_details(user_email))
             except Exception as exc:
-                logger.warning("当月使用量の取得に失敗しました。", exc_info=True)
-                output += "\n\n当月の詳細を取得できませんでした。時間をおいて `/usage` を実行してください。"
+                logger.warning("当月・全期間使用量の取得に失敗しました。", exc_info=True)
+                output += "\n\n当月・全期間の詳細を取得できませんでした。時間をおいて `/usage` を実行してください。"
                 usage_logger.log_error(user_email=user_email, session_id=ctx.session_id, turn_id=ctx.turn_id,
                                        error_source="usage_report_error", error_text=technical_detail(exc, limit=10_000))
     elif command.name == "/new" and not command.argument:

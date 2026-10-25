@@ -9,7 +9,7 @@ COMMAND_SUGGESTIONS = [
     {"command": "/help", "description": "コマンドの一覧を表示"},
     {"command": "/model", "description": "使用中のモデルを確認"},
     {"command": "/new", "description": "新しいチャットを開始"},
-    {"command": "/usage", "description": "当月のトークン・クエリ量・費用を確認"},
+    {"command": "/usage", "description": "当月・全期間の会話数・トークン・費用を確認"},
     {"command": "/thinking", "description": "詳細分析モードを切り替え（有効時High）"},
     {"command": "/effort", "description": "Low / Medium / Highを選択"},
 ]
@@ -21,7 +21,7 @@ HELP = """\
 | `/help` | コマンドの一覧 |
 | `/model` | 使用中のモデルを表示 |
 | `/new` | 新しいチャットを開始 |
-| `/usage` | 当月のInput・Output（思考を含む）、クエリ量、費用と残額 |
+| `/usage` | 当月・全期間の会話数・質問数、トークン・クエリ量、費用と当月の残額 |
 | `/thinking` | 詳細分析モードを切り替え。有効時High、解除時は元のeffortへ戻す |
 | `/effort` | Low / Medium / Highを選択（クリック・上下キーとEnterで選択） |
 
@@ -82,12 +82,31 @@ def current_month_usage_text(frame) -> str:
     if frame.empty:
         return "\n\n当月の利用ログはまだありません。"
     row = next(frame.itertuples(index=False))
+    return _usage_detail_text(row, f"当月の詳細（{str(row.month)[:7]}・日本時間、金額はUSD）")
+
+
+def usage_details_text(frame) -> str:
+    if frame.empty:
+        return "\n\n当月・全期間の利用ログはまだありません。"
+    reports = []
+    for row in frame.itertuples(index=False):
+        heading = (f"当月の詳細（{str(row.month)[:7]}・日本時間、金額はUSD）" if row.period == "month"
+                   else "全期間の累計（記録されている利用ログ全体、金額はUSD）")
+        reports.append(_usage_detail_text(row, heading))
+    return "".join(reports) + "\n\n会話数は質問ログの会話ID数、質問数は送信ID数です。コマンドは含まず、確認質問への回答は1件に数えます。削除した会話の利用ログも含みます。ログの記録開始前・欠落分は含まれません。"
+
+
+def _usage_detail_text(row, heading: str) -> str:
     bq_usd = bq_cost_usd(row.billed_bytes)
     lines = [
-        f"\n\n当月の詳細（{str(row.month)[:7]}・日本時間、金額はUSD）",
+        f"\n\n{heading}",
         "",
         "| 項目 | 使用量 |",
         "| --- | ---: |",
+    ]
+    if hasattr(row, "chat_count"):
+        lines += [f"| 会話数 | {int(row.chat_count):,} |", f"| 質問数 | {int(row.question_count):,} |"]
+    lines += [
         f"| Inputトークン | {int(row.input_tokens):,} |",
         f"| Outputトークン（思考を含む） | {int(row.output_tokens):,} |",
         f"| AI呼び出し回数 | {int(row.gemini_calls):,} |",

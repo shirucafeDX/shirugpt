@@ -14,7 +14,7 @@ Streamlit アプリです。現在は Streamlit Community Cloud に限定公開�
 - Gemini 3.8 Flashを通常はMediumで使用します。`/effort` でLow／Medium／Highを選択でき、
   入力欄の枠はLow＝緑、Medium＝青、High＝紫です。`/thinking` はHighと詳細分析用の指示を適用し、再入力で解除します。
 - 入力欄で `/` を打つとコマンド候補を表示します。クリック、または上下キーとEnterで実行できます（Tabは入力補完）。
-- `/usage` では当月の入力・出力（思考を含む）トークン、クエリ量、Gemini・BigQueryの費用と単価を確認できます。
+- `/usage` では当月・全期間の会話数・質問数、トークン数、クエリ量、Gemini・BigQueryの費用を確認できます。
 
 ## 使用サービスと構成
 

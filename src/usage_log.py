@@ -472,6 +472,66 @@ class UsageLogger:
         report["gemini_usd"] = pd.to_numeric(report["gemini_usd"]).astype(float)
         return report[columns].sort_values("month", ascending=False).reset_index(drop=True)
 
+    def usage_details(self, user_email: str, now_utc: datetime | None = None) -> pd.DataFrame:
+        """本人の当月・全期間の費用と会話数・質問数を、2テーブルの集計後に結合する。"""
+        columns = ["period", "month", "chat_count", "question_count", "input_tokens", "output_tokens",
+                   "gemini_calls", "bq_queries", "billed_bytes", "gemini_usd"]
+        if not self.settings.logging_enabled or not user_email.strip():
+            return pd.DataFrame(columns=columns)
+        as_of = now_utc if now_utc is not None else datetime.now(timezone.utc)
+        start, _ = jst_month_bounds_utc(as_of)
+        sql = f"""
+            WITH periods AS (
+              SELECT 'month' AS period, @start AS start_time
+              UNION ALL SELECT 'all', CAST(NULL AS TIMESTAMP)
+            ), event_rows AS (
+              SELECT event_time, event_type, prompt_tokens, output_tokens, billed_bytes, model
+              FROM `{self.table_id}`
+              WHERE user_email = @user_email AND event_time < @as_of
+            ), prompt_rows AS (
+              SELECT session_id, turn_id, event_time FROM `{self.prompt_log_table_id}`
+              WHERE user_email = @user_email AND event_time < @as_of
+            ), usage_totals AS (
+              SELECT p.period,
+                SUM(IF(e.event_type = '{EVENT_GEMINI_CALL}', IFNULL(e.prompt_tokens, 0), 0)) AS input_tokens,
+                SUM(IF(e.event_type = '{EVENT_GEMINI_CALL}', IFNULL(e.output_tokens, 0), 0)) AS output_tokens,
+                COUNTIF(e.event_type = '{EVENT_GEMINI_CALL}') AS gemini_calls,
+                COUNTIF(e.event_type = '{EVENT_BQ_QUERY}') AS bq_queries,
+                SUM(IF(e.event_type = '{EVENT_BQ_QUERY}', IFNULL(e.billed_bytes, 0), 0)) AS billed_bytes,
+                SUM(IF(e.event_type = '{EVENT_GEMINI_CALL}', {gemini_cost_sql(self.settings.vertex_location)}, 0)) AS gemini_usd
+              FROM periods p CROSS JOIN event_rows e
+              WHERE p.start_time IS NULL OR e.event_time >= p.start_time
+              GROUP BY p.period
+            ), question_totals AS (
+              SELECT p.period,
+                COUNT(DISTINCT NULLIF(q.session_id, '')) AS chat_count,
+                COUNT(DISTINCT NULLIF(q.turn_id, '')) AS question_count
+              FROM periods p CROSS JOIN prompt_rows q
+              WHERE p.start_time IS NULL OR q.event_time >= p.start_time
+              GROUP BY p.period
+            )
+            SELECT p.period, u.input_tokens, u.output_tokens, u.gemini_calls, u.bq_queries,
+              u.billed_bytes, u.gemini_usd, q.chat_count, q.question_count
+            FROM periods p
+            LEFT JOIN usage_totals u USING (period)
+            LEFT JOIN question_totals q USING (period)
+        """
+        config = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("user_email", "STRING", user_email),
+            bigquery.ScalarQueryParameter("start", "TIMESTAMP", start),
+            bigquery.ScalarQueryParameter("as_of", "TIMESTAMP", as_of),
+        ], maximum_bytes_billed=self.settings.max_bytes_billed, use_query_cache=True)
+        frame = self._get_client().query(sql, job_config=config, location=self.settings.bq_location).result().to_dataframe(create_bqstorage_client=False)
+        periods = pd.DataFrame({"period": ["month", "all"]})
+        values = [column for column in columns if column not in ("period", "month")]
+        if frame.empty:
+            report = periods.assign(**{column: 0 for column in values})
+        else:
+            report = periods.merge(frame, on="period", how="left").fillna(0)
+        report["month"] = start.astimezone(_JST).date()
+        report["gemini_usd"] = pd.to_numeric(report["gemini_usd"]).astype(float)
+        return report[columns]
+
     def monthly_usage(
         self, user_email: str, start_utc: datetime, end_utc: datetime
     ) -> MonthlyUsage:
