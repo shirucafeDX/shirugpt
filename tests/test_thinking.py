@@ -26,7 +26,7 @@ def user(text):
 
 
 class ThinkingTests(unittest.TestCase):
-    def test_medium_is_fixed_without_router_and_high_is_isolated_per_conversation(self):
+    def test_low_is_default_without_router_and_high_is_isolated_per_conversation(self):
         client = Mock()
         client.models.generate_content.side_effect = [response('件数です'), response('詳しい分析です'), response('比較です')]
         agent = GeminiAgent(settings(), client=client)
@@ -39,7 +39,7 @@ class ThinkingTests(unittest.TestCase):
         agent.run(contents, normal)
         calls = client.models.generate_content.call_args_list
         self.assertEqual(len(calls), 3)
-        for call, expected in zip(calls, ('MEDIUM', 'HIGH', 'MEDIUM')):
+        for call, expected in zip(calls, ('LOW', 'HIGH', 'LOW')):
             config = call.kwargs['config']
             self.assertEqual(config.thinking_config.thinking_level.value, expected)
             self.assertIsNone(config.thinking_config.thinking_budget)
@@ -47,7 +47,7 @@ class ThinkingTests(unittest.TestCase):
             self.assertEqual(config.system_instruction, SYSTEM_INSTRUCTION)
             self.assertEqual(call.kwargs['model'], 'gemini-3.8-flash')
         self.assertIsNone(agent.thinking_level)
-        self.assertEqual(normal.thinking_mode, 'medium')
+        self.assertEqual(normal.thinking_mode, 'low')
         self.assertIn('件数です', calls[-1].kwargs['contents'][1].parts[0].text)
         self.assertAlmostEqual(normal.gemini_cost_usd(), 2 * gemini_cost_usd(10, 10, 'gemini-3.8-flash'))
 
@@ -102,11 +102,11 @@ class ThinkingTests(unittest.TestCase):
         self.assertEqual(converted[1].parts[0].text, '10件です')
         self.assertIsNone(converted[1].parts[0].thought_signature)
 
-    def test_old_auto_history_is_migrated_to_medium(self):
+    def test_old_auto_history_is_migrated_to_low(self):
         ctx = ToolContext(tools=Mock(), settings=settings(), thinking_mode='auto', active_thinking_level='low')
         restored = ToolContext(tools=Mock(), settings=settings())
         unpack(pack([], [], ctx, None), restored)
-        self.assertEqual(restored.thinking_mode, 'medium')
+        self.assertEqual(restored.thinking_mode, 'low')
         self.assertEqual(restored.active_thinking_level, 'low')
 
     def test_removed_command_and_effort_arguments_do_not_change_mode(self):

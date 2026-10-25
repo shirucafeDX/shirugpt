@@ -17,6 +17,7 @@ from google.genai import types
 from .agent import ConfirmationPending, ToolContext
 from .bq_tools import QueryRun
 from .tool_catalog import restored_selection
+from .thinking import DEFAULT_EFFORT
 
 # 実行時オブジェクト、認証情報、月次利用量のベースラインは保存しない。
 CONTEXT_FIELDS = (
@@ -121,8 +122,8 @@ def unpack(data, ctx):
         ctx.context_state = context.get('context_state', {})
         ctx.active_tool_names = restored_selection(context.get('active_tool_names'))
         ctx.thinking_enabled = context.get('thinking_enabled') is True
-        previous = context.get('thinking_previous_effort', 'medium')
-        ctx.thinking_previous_effort = previous if previous in ('low', 'medium', 'high') else 'medium'
+        previous = context.get('thinking_previous_effort', DEFAULT_EFFORT)
+        ctx.thinking_previous_effort = previous if previous in ('low', 'medium', 'high') else DEFAULT_EFFORT
         if 'session_thinking_tokens' not in context:
             ctx.session_thinking_tokens = None
         messages, contents = decode(payload['messages']), decode(payload['contents'])
@@ -139,9 +140,9 @@ def unpack(data, ctx):
             ctx.context_state = {}
             ctx.active_tool_names = []
         if ctx.thinking_mode not in ('low', 'medium', 'high'):
-            ctx.thinking_mode = 'medium'
+            ctx.thinking_mode = DEFAULT_EFFORT
         if ctx.active_thinking_level not in ('low', 'medium', 'high'):
-            ctx.active_thinking_level = 'medium'
+            ctx.active_thinking_level = DEFAULT_EFFORT
         if payload['status'] == 'running':
             text = '前回の処理は中断されました。必要に応じて、もう一度質問してください。'
             messages.append({'role': 'assistant', 'text': text, 'is_error': True})

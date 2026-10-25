@@ -26,6 +26,7 @@ from .config import (
     human_bytes,
 )
 from .fx import usd_to_jpy
+from .thinking import DEFAULT_EFFORT
 from .usage_log import UsageLogger
 
 # 日付範囲の上限。ログテーブルが将来肥大化したときのスキャン量の保険。
@@ -133,7 +134,7 @@ def _render_settings_tab(settings: Settings) -> None:
     st.subheader("現在適用中の設定")
     st.caption("起動時に読み込んだ設定です。環境変数や Secrets の変更後はアプリを再起動してください。")
     thinking = (
-        "Medium（/effortでLow・Medium・Highを選択）" if settings.gemini_model == "gemini-3.8-flash" else
+        f"{DEFAULT_EFFORT.title()}（/effortでLow・Medium・Highを選択）" if settings.gemini_model == "gemini-3.8-flash" else
         "未指定（モデル既定）" if settings.thinking_budget is None else
         "動的（-1）" if settings.thinking_budget == -1 else
         "無効（0）" if settings.thinking_budget == 0 else

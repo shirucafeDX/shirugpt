@@ -4,8 +4,8 @@ export default function ({ data, parentElement, setTriggerValue }) {
   const commands = data?.commands || [];
   const effortOpen = Boolean(data?.effort_open);
   const efforts = [
-    {command: "Low", mode: "low", description: "思考量を抑える"},
-    {command: "Medium", mode: "medium", description: "通常の思考量"},
+    {command: "Low", mode: "low", description: "既定・思考量を抑える"},
+    {command: "Medium", mode: "medium", description: "バランスのよい思考量"},
     {command: "High", mode: "high", description: "思考量を増やす"},
   ];
   const menu = document.createElement("div");

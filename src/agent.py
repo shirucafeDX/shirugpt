@@ -34,6 +34,7 @@ from .bq_tools import (
 from .config import Settings, human_bytes, gemini_cost_usd
 from .prompts import SYSTEM_INSTRUCTION, build_system_instruction
 from .sql_guard import SQLGuardError
+from .thinking import DEFAULT_EFFORT
 from .usage_log import UsageLogger
 from .execution import ExecutionControl, ExecutionStopped
 from . import context_memory, tool_catalog
@@ -93,9 +94,9 @@ class ToolContext:
     resume_calls: list[Any] | None = None
     execution_control: ExecutionControl | None = None
     thinking_enabled: bool = False
-    thinking_previous_effort: str = "medium"
-    thinking_mode: str = "medium"
-    active_thinking_level: str = "medium"
+    thinking_previous_effort: str = DEFAULT_EFFORT
+    thinking_mode: str = DEFAULT_EFFORT
+    active_thinking_level: str = DEFAULT_EFFORT
 
     # 直近ターンの記録（UI 表示用）
     turn_runs: list[QueryRun] = field(default_factory=list)
@@ -373,7 +374,7 @@ class GeminiAgent:
         }
         if self.settings.gemini_model == "gemini-3.8-flash":
             kwargs["thinking_config"] = types.ThinkingConfig(
-                thinking_level=(self.thinking_level or "medium").upper(),
+                thinking_level=(self.thinking_level or DEFAULT_EFFORT).upper(),
             )
         elif self.settings.thinking_budget is not None:
             kwargs["thinking_config"] = types.ThinkingConfig(
@@ -785,7 +786,7 @@ class GeminiAgent:
         """
         if getattr(self.settings, "gemini_model", "") == "gemini-3.8-flash" and self.thinking_level is None:
             if ctx.resume_calls is None:
-                ctx.active_thinking_level = ctx.thinking_mode if ctx.thinking_mode in ("low", "medium", "high") else "medium"
+                ctx.active_thinking_level = ctx.thinking_mode if ctx.thinking_mode in ("low", "medium", "high") else DEFAULT_EFFORT
             # 共用のエージェントを変更せず、今回のターンにだけ設定を固定する。
             turn_agent = GeminiAgent(self.settings, client=self.client,
                                      thinking_level=ctx.active_thinking_level, deep_analysis=ctx.thinking_enabled)

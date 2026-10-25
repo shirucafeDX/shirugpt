@@ -36,6 +36,7 @@ from src.charts import ChartSpec, special_chart_spec
 from src.execution import BackgroundTurn, ExecutionStopped
 from src.commands import HELP, parse_command, usage_text, usage_details_text
 from src.command_menu import render_command_menu
+from src.thinking import DEFAULT_EFFORT
 from src.presentation import choose_presentation
 from src.config import (
     DEFAULT_MONTHLY_LIMIT_USD,
@@ -200,7 +201,7 @@ def init_state(
             settings, tools, usage_logger, user_email
         )
     if st.session_state.ctx.thinking_mode not in ("low", "medium", "high"):
-        st.session_state.ctx.thinking_mode = "medium"
+        st.session_state.ctx.thinking_mode = DEFAULT_EFFORT
     return st.session_state.ctx
 
 
@@ -939,7 +940,7 @@ def render_prompt_input(ctx: ToolContext, *, running: bool = False) -> str | Non
         else:
             st.session_state.pop("command_output", None)
         st.rerun()
-    color = {"low": "#0d9488", "medium": "#3b82f6", "high": "#8b5cf6"}.get(getattr(ctx, "thinking_mode", "medium"), "#3b82f6")
+    color = {"low": "#0d9488", "medium": "#3b82f6", "high": "#8b5cf6"}.get(getattr(ctx, "thinking_mode", DEFAULT_EFFORT), "#0d9488")
     st.markdown("""
 <style>
 .st-key-prompt_input [data-testid="stChatInput"],
@@ -960,7 +961,7 @@ def render_prompt_input(ctx: ToolContext, *, running: bool = False) -> str | Non
 """.replace("__COLOR__", color), unsafe_allow_html=True)
     prompt = st.chat_input("処理中…" if running else "ShiruGPT に聞く", key="prompt_input", disabled=running)
     render_command_menu(effort_open=bool(st.session_state.get("effort_panel")) and not running,
-                        effort=getattr(ctx, "thinking_mode", "medium"), running=running)
+                        effort=getattr(ctx, "thinking_mode", DEFAULT_EFFORT), running=running)
     return st.session_state.pop("keyboard_command", None) or prompt
 
 
@@ -1005,7 +1006,7 @@ def handle_command(prompt, ctx, settings, tools, usage_logger, user_email,
             if ctx.thinking_enabled:
                 ctx.thinking_enabled = False
                 previous = ctx.thinking_previous_effort
-                ctx.thinking_mode = previous if previous in ("low", "medium", "high") else "medium"
+                ctx.thinking_mode = previous if previous in ("low", "medium", "high") else DEFAULT_EFFORT
                 output = f"詳細分析モードを解除しました。effortは **{ctx.thinking_mode.title()}** に戻りました。"
             else:
                 ctx.thinking_previous_effort = ctx.thinking_mode

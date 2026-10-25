@@ -11,7 +11,7 @@ Streamlit アプリです。現在は Streamlit Community Cloud に限定公開�
   元データ・SQL・実行量の確認と CSV 出力にも対応します。
 - ログインした本人のチャット履歴を保存し、続きから分析できます。履歴は5件ずつ追加表示し、最近5件と開いた会話をキャッシュします。
 - 利用者ごとの使用量記録・月次利用上限と、管理者向けの利用状況・設定確認に対応します。
-- Gemini 3.8 Flashを通常はMediumで使用します。`/effort` でLow／Medium／Highを選択でき、
+- Gemini 3.8 Flashを通常はLowで使用します。`/effort` でLow／Medium／Highを選択でき、
   入力欄の枠はLow＝緑、Medium＝青、High＝紫です。`/thinking` はHighと詳細分析用の指示を適用し、再入力で解除します。
 - 入力欄で `/` を打つとコマンド候補を表示します。クリック、または上下キーとEnterで実行できます（Tabは入力補完）。
 - `/usage` では当月・全期間の会話数・質問数、トークン数、クエリ量、Gemini・BigQueryの費用を確認できます。

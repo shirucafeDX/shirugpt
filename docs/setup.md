@@ -212,7 +212,7 @@ cp .env.example .env
 | `BQ_ALLOWED_DATASETS` | `202506` | **アクセスを許可するデータセットの allowlist**（カンマ区切り） |
 | `VERTEX_LOCATION` | `global` | Gemini 3.8 Flashは `global` / `us` / `eu` に対応 |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | 使用モデル |
-| `GEMINI_THINKING_BUDGET` | （空） | 旧2.5用。3.8では使わず、通常medium、明示指定でhigh |
+| `GEMINI_THINKING_BUDGET` | （空） | 旧2.5用。3.8では使わず、既定はLow、/effortでMedium・Highも選択可能 |
 | `DRY_RUN_CONFIRM_BYTES` | `1073741824`（1GB） | 推定スキャン量がこれを超えたら実行前に確認 |
 | `MAX_BYTES_BILLED` | `10737418240`（10GB） | BigQuery に渡す課金上限。超えるクエリは BigQuery 側で失敗 |
 | `DEFAULT_ROW_LIMIT` | `1000` | 外側に `LIMIT` が無い場合に自動付与する行数 |

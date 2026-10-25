@@ -5,6 +5,7 @@ import streamlit as st
 import streamlit.components.v2 as components
 
 from .commands import COMMAND_SUGGESTIONS
+from .thinking import DEFAULT_EFFORT
 
 
 _JS = Path(__file__).with_name("command_menu.js").read_text()
@@ -26,7 +27,7 @@ def _keyboard_event() -> None:
         st.session_state["clarification_keyboard"] = payload
 
 
-def render_command_menu(*, effort_open=False, effort="medium", running=False) -> None:
+def render_command_menu(*, effort_open=False, effort=DEFAULT_EFFORT, running=False) -> None:
     # アプリの実行環境ごとに登録する（AppTestも独立した環境を作る）。
     menu = components.component("slash_command_menu", js=_JS, isolate_styles=False)
     menu(key="slash_command_menu", data={"commands": COMMAND_SUGGESTIONS, "effort_open": effort_open, "effort": effort, "running": running, "command_output_open": bool(st.session_state.get("command_output"))}, height=0, on_action_change=_keyboard_event)

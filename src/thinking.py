@@ -1,4 +1,6 @@
-"""/thinkingでのみ追加する詳細分析の指示。effortとは独立。"""
+"""思考量の既定値と、/thinkingでのみ追加する詳細分析の指示。"""
+
+DEFAULT_EFFORT = "low"
 
 DEEP_ANALYSIS_INSTRUCTION = """\n## 詳細分析モード
 分析では関連する実データを複数の観点から調べ、考えられる仮説を比較・検証する。

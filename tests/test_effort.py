@@ -28,6 +28,8 @@ if prompt:
 class EffortTests(unittest.TestCase):
     def test_effort_popup_switches_without_buttons_or_success_message(self):
         app = AppTest.from_string(SOURCE).run(timeout=20)
+        self.assertEqual(app.session_state.ctx.thinking_mode, 'low')
+        self.assertTrue(any('#0d9488' in m.value for m in app.markdown))
         app.chat_input[0].set_value('/effort').run()
         self.assertFalse(app.exception)
         self.assertTrue(app.session_state['effort_panel'])
@@ -50,9 +52,9 @@ class EffortTests(unittest.TestCase):
         app.chat_input[0].set_value('/effort').run()
         self.assertNotIn('effort_panel', app.session_state)
         self.assertIn('実行確認待ち', app.session_state.command_output)
-        app.session_state['keyboard_effort'] = 'low'
+        app.session_state['keyboard_effort'] = 'high'
         app.run()
-        self.assertEqual(app.session_state.ctx.thinking_mode, 'medium')
+        self.assertEqual(app.session_state.ctx.thinking_mode, 'low')
 
     def test_thinking_restores_original_effort_and_keeps_chat(self):
         app = AppTest.from_string(SOURCE).run(timeout=20)
