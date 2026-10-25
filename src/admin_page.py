@@ -143,6 +143,9 @@ def _render_settings_tab(settings: Settings) -> None:
     # 認証キー・パス・管理者メール等を誤って表示しないよう、明示した項目だけを使う。
     rows = [
         ("モデル", settings.gemini_model),
+        ("Gemini API", getattr(settings, 'gemini_api', 'generate_content')),
+        ("状態引き継ぎの入力基準", f"{getattr(settings, 'interaction_max_input_tokens', 32000):,} トークン（80%で要点へ引き継ぎ）"),
+        ("Gemini 待機タイムアウト", f"{getattr(settings, 'gemini_request_timeout_seconds', 120)} 秒"),
         ("Gemini リージョン", settings.vertex_location),
         ("思考設定", thinking),
         ("出力トークン上限", "未指定（モデル既定）"),

@@ -21,6 +21,7 @@ from .thinking import DEFAULT_EFFORT
 
 # 実行時オブジェクト、認証情報、月次利用量のベースラインは保存しない。
 CONTEXT_FIELDS = (
+    'interaction_state', 'tool_receipts',
     'active_tool_names', 'analysis_cache', 'context_state', 'schema_cache', 'listing_cache', 'query_cache', 'decisions', 'resume_calls',
     'turn_runs', 'turn_analyses', 'turn_errors', 'turn_prompt_tokens', 'turn_output_tokens',
     'turn_thinking_tokens', 'turn_total_tokens', 'session_prompt_tokens',
@@ -60,7 +61,7 @@ def pack(messages, contents, ctx, pending, status='ready') -> bytes:
             if isinstance(value, QueryRun):
                 return {'$type': 'run', 'value': {f.name: encode(getattr(value, f.name)) for f in fields(value)}}
             if isinstance(value, (types.Content, types.FunctionCall)):
-                return {'$type': type(value).__name__, 'value': encode(value.model_dump(mode='python'))}
+                return {'$type': type(value).__name__, 'value': encode(value.model_dump(mode='python', exclude_none=True))}
             if isinstance(value, bytes):
                 return {'$type': 'bytes', 'value': base64.b64encode(value).decode('ascii')}
             if isinstance(value, (datetime, date, time, Decimal)):
@@ -106,7 +107,13 @@ def unpack(data, ctx):
             if kind == 'run':
                 return QueryRun(**decode(raw))
             if kind in ('Content', 'FunctionCall'):
-                return getattr(types, kind).model_validate(decode(raw))
+                data = decode(raw)
+                if kind == 'Content':
+                    # 保存元SDKで追加された未使用のPartフィールドだけを除外する。
+                    data['parts'] = [{k: v for k, v in part.items()
+                                      if k in types.Part.model_fields or v is not None}
+                                     for part in data.get('parts') or []]
+                return getattr(types, kind).model_validate(data)
             if kind == 'bytes':
                 return base64.b64decode(raw)
             if kind in ('datetime', 'date', 'time'):
@@ -120,6 +127,8 @@ def unpack(data, ctx):
             if key in context:
                 setattr(ctx, key, context[key])
         ctx.context_state = context.get('context_state', {})
+        ctx.interaction_state = context.get('interaction_state') if isinstance(context.get('interaction_state'), dict) else {}
+        ctx.tool_receipts = context.get('tool_receipts') if isinstance(context.get('tool_receipts'), dict) else {}
         ctx.active_tool_names = restored_selection(context.get('active_tool_names'))
         ctx.thinking_enabled = context.get('thinking_enabled') is True
         previous = context.get('thinking_previous_effort', DEFAULT_EFFORT)
@@ -128,22 +137,27 @@ def unpack(data, ctx):
             ctx.session_thinking_tokens = None
         messages, contents = decode(payload['messages']), decode(payload['contents'])
         pending = ConfirmationPending(**payload['pending']) if payload['pending'] else None
-        if payload['policy'][2] != ctx.settings.gemini_model:
+        api_changed = bool(ctx.interaction_state) and getattr(ctx.settings, 'gemini_api', 'generate_content') != 'interactions'
+        if payload['policy'][2] != ctx.settings.gemini_model or api_changed:
             # 別モデルの署名や未完のFunction Callingを送らず、質問と回答を引き継ぐ。
             contents = [types.Content(role='user' if m['role'] == 'user' else 'model',
                                       parts=[types.Part.from_text(text=m['text'])])
                         for m in messages if m.get('text')]
             if pending is not None:
-                messages.append({'role': 'assistant', 'text': 'モデルが変更されたため、以前の実行確認は解除しました。必要に応じて、もう一度質問してください。'})
+                messages.append({'role': 'assistant', 'text': 'モデルまたはAPIが変更されたため、以前の実行確認は解除しました。必要に応じて、もう一度質問してください。'})
             pending = None
             ctx.resume_calls = None
             ctx.context_state = {}
+            ctx.interaction_state = {}
+            ctx.tool_receipts = {}
             ctx.active_tool_names = []
         if ctx.thinking_mode not in ('low', 'medium', 'high'):
             ctx.thinking_mode = DEFAULT_EFFORT
         if ctx.active_thinking_level not in ('low', 'medium', 'high'):
             ctx.active_thinking_level = DEFAULT_EFFORT
         if payload['status'] == 'running':
+            if ctx.interaction_state:
+                ctx.interaction_state['reset_required'] = True
             text = '前回の処理は中断されました。必要に応じて、もう一度質問してください。'
             messages.append({'role': 'assistant', 'text': text, 'is_error': True})
             contents.append(types.Content(role='model', parts=[types.Part.from_text(text=text)]))

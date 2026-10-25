@@ -121,12 +121,27 @@ class MemoryTests(unittest.TestCase):
         self.assertIn('要点4', request[5].parts[0].text)
         self.assertEqual(request[-1].parts[0].text, '最新の質問')
 
-    def test_legacy_or_plain_answer_without_memo_keeps_original(self):
+    def test_plain_answer_without_memo_omits_tool_transcript_and_keeps_archive(self):
         self.query_then_analyze(self.note(['unknown']))
-        old = list(self.contents)
+        old = [c.model_dump() for c in self.contents]
         self.contents.append(text('user', '追加質問'))
         request = memory.build_request(self.contents, self.ctx)
-        self.assertEqual(request[:len(old)], old)
+        wire = memory.encoded([c.model_dump(exclude_none=True) for c in request])
+        self.assertEqual(request[0].parts[0].text, self.contents[0].parts[0].text)
+        memo = json.loads(request[1].parts[0].text)
+        self.assertEqual(memo['answer'], '回答')
+        self.assertIn(self.rid, [item['result_id'] for item in memo['results']])
+        self.assertNotIn(self.sql, wire)
+        self.assertNotIn('function_call', wire)
+        self.assertEqual([c.model_dump() for c in self.contents[:-1]], old)
+        self.assertLess(len(wire), len(memory.encoded(old)))
+
+    def test_unfinished_past_turn_keeps_calls_and_signatures(self):
+        model = reply('list_datasets').candidates[0].content
+        self.contents.extend([model, text('user', '追加質問')])
+        request = memory.build_request(self.contents, self.ctx)
+        self.assertIs(request[1], model)
+        self.assertEqual(request[1].parts[0].thought_signature, b'original-signature')
 
     def test_recall_selects_columns_and_rows_beyond_original_sample_without_queries(self):
         self.query_then_analyze()

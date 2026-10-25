@@ -212,6 +212,9 @@ cp .env.example .env
 | `BQ_ALLOWED_DATASETS` | `202506` | **アクセスを許可するデータセットの allowlist**（カンマ区切り） |
 | `VERTEX_LOCATION` | `global` | Gemini 3.8 Flashは `global` / `us` / `eu` に対応 |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | 使用モデル |
+| `GEMINI_API` | `interactions` | 状態IDで継続するAPI。旧方式は `generate_content` |
+| `GEMINI_STATE_MAX_INPUT_TOKENS` | `32000` | 実入力＋直前出力＋次の差分の概算が80%に達したら要点から新状態へ引き継ぐ |
+| `GEMINI_REQUEST_TIMEOUT_SECONDS` | `120` | Interactions APIの生成待機上限（秒）。生成の自動再試行は無効 |
 | `GEMINI_THINKING_BUDGET` | （空） | 旧2.5用。3.8では使わず、既定はLow、/effortでMedium・Highも選択可能 |
 | `DRY_RUN_CONFIRM_BYTES` | `1073741824`（1GB） | 推定スキャン量がこれを超えたら実行前に確認 |
 | `MAX_BYTES_BILLED` | `10737418240`（10GB） | BigQuery に渡す課金上限。超えるクエリは BigQuery 側で失敗 |
@@ -223,7 +226,7 @@ cp .env.example .env
 | `MEDIUM_RESULT_ROWS` | `1000` | 中規模と大規模の分類境界 |
 | `MAX_DATA_TOKENS` | `8000` | データ返却の推定トークン上限 |
 | `TARGET_DATA_TOKENS` | `4000` | 縮小時の推定トークン目標 |
-| `MAX_HISTORY_TOKENS` | `16000` | 会話履歴の推定トークン上限 |
+| `MAX_HISTORY_TOKENS` | `16000` | 状態復元用メモの推定上限。旧APIでは送信会話全体の推定上限 |
 | `ANALYSIS_TIMEOUT_SECONDS` | `3` | ローカルSQLと分析の時間確認 |
 | `BQ_QUERY_TIMEOUT_SECONDS` | `120` | BigQuery結果待機の上限（秒） |
 | `MAX_TOOL_ITERATIONS` | `50` | 1 ターンあたりの tool 呼び出しループ上限 |

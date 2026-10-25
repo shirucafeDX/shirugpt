@@ -93,6 +93,9 @@ class Settings:
     max_history_tokens: int = 16000
     analysis_timeout_seconds: int = 3
     bq_query_timeout_seconds: int = 120
+    gemini_api: str = "interactions"
+    interaction_max_input_tokens: int = 32000
+    gemini_request_timeout_seconds: int = 120
 
     def is_dataset_allowed(self, dataset: str) -> bool:
         return dataset in self.allowed_datasets
@@ -178,6 +181,15 @@ def load_settings() -> Settings:
     bq_timeout = _int("BQ_QUERY_TIMEOUT_SECONDS", 120)
     if bq_timeout < 1:
         raise ConfigError("BQ_QUERY_TIMEOUT_SECONDSは1以上で指定してください。")
+    gemini_api = _str("GEMINI_API", "interactions")
+    if gemini_api not in ("interactions", "generate_content"):
+        raise ConfigError("GEMINI_APIはinteractionsまたはgenerate_contentを指定してください。")
+    interaction_limit = _int("GEMINI_STATE_MAX_INPUT_TOKENS", 32000)
+    if interaction_limit < 2048:
+        raise ConfigError("GEMINI_STATE_MAX_INPUT_TOKENSは2048以上で指定してください。")
+    gemini_timeout = _int("GEMINI_REQUEST_TIMEOUT_SECONDS", 120)
+    if gemini_timeout < 1:
+        raise ConfigError("GEMINI_REQUEST_TIMEOUT_SECONDSは1以上で指定してください。")
     return Settings(
         gcp_project=project,
         bq_location=_str("BQ_LOCATION") or None,
@@ -201,6 +213,9 @@ def load_settings() -> Settings:
         admin_allow_local=_bool("ADMIN_ALLOW_LOCAL"),
         chat_history_bucket=_str("CHAT_HISTORY_BUCKET"),
         bq_query_timeout_seconds=bq_timeout,
+        gemini_api=gemini_api,
+        interaction_max_input_tokens=interaction_limit,
+        gemini_request_timeout_seconds=gemini_timeout,
         **vars(analysis_policy),
     )
 

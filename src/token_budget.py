@@ -103,12 +103,16 @@ def bound_history(request, ctx):
     from . import context_memory
     policy = BudgetPolicy.from_settings(ctx.settings)
     def size(contents):
-        return estimate_tokens([c.model_dump(exclude_none=True) for c in contents])
+        # SDK送信時と同じbase64表現を使う。bytesのreprは署名を過大評価する。
+        return estimate_tokens([c.model_dump(mode='json', exclude_none=True) for c in contents])
     original = size(request)
     reduced = list(request)
     if original > policy.max_history_tokens:
-        # 旧形式・未読の巨大結果も、まずメタデータに縮小。原本はcontext_state/cacheに残る。
-        for index, content in enumerate(reduced):
+        # 古い応答から必要な分だけ縮小。直近の応答はモデルがまだ読んでいないため維持。
+        # 原本はcontext_state/cacheに残る。
+        for index, content in enumerate(reduced[:-1]):
+            if size(reduced) <= policy.max_history_tokens:
+                break
             parts = []
             changed = False
             for part in content.parts or []:
@@ -156,5 +160,5 @@ def bound_history(request, ctx):
     ctx.context_state.setdefault('last_request', {}).update(
         estimated_tokens_before=original, estimated_tokens_after=after,
         history_contents_omitted=omitted, history_budget_applied=original > policy.max_history_tokens,
-        sent_chars=len(json.dumps([c.model_dump(exclude_none=True) for c in reduced], ensure_ascii=False, default=str, separators=(',', ':'))))
+        sent_chars=len(json.dumps([c.model_dump(mode='json', exclude_none=True) for c in reduced], ensure_ascii=False, separators=(',', ':'))))
     return reduced

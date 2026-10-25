@@ -81,6 +81,7 @@ _SECRET_ENV_KEYS = (
     "BQ_ALLOWED_DATASETS",
     "VERTEX_LOCATION",
     "GEMINI_MODEL",
+    "GEMINI_API", "GEMINI_STATE_MAX_INPUT_TOKENS", "GEMINI_REQUEST_TIMEOUT_SECONDS",
     "GEMINI_THINKING_BUDGET",
     "DRY_RUN_CONFIRM_BYTES",
     "MAX_BYTES_BILLED",
@@ -744,6 +745,8 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
             # 他の例外と同じ経路で扱い、アプリ全体を落とさない。
             raise AssertionError(f"想定外の戻り値: {result!r}")
     except ExecutionStopped:
+        if ctx.interaction_state:
+            ctx.interaction_state['reset_required'] = True
         contents = st.session_state.contents
         # 実行途中のツール要求にも応答を付け、次の質問で会話形式が壊れないようにする。
         if contents and contents[-1].role == "model":

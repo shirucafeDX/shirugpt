@@ -129,7 +129,13 @@ Gemini トークン代 + BigQuery クエリ代の合計です。`MonthlyUsage.co
 JSON には `finish_reason`、`finish_message`、トークン内訳、`token_scope`（response / turn）を含みます。
 API が使用量を返さない場合、その呼び出しの内訳は null です。
 トークンは診断用 JSON に入れ、課金集計用の列には重複記録しません。
-既存の BigQuery テーブルへのカラム追加は不要です。
+終了診断のためのカラム追加は不要です。
+
+Interactions APIへの移行では、`usage_events`に`cached_input_tokens`と`api`を追加します。
+既存テーブルは初期化時に不足カラムを追加し、旧ログのNULLはそのまま保持します。
+`prompt_tokens`はキャッシュ分を含むAPI報告値で、`cached_input_tokens`はその内訳です。
+費用表示・月次使用制限は従来のモデル別標準単価による推定を維持します。
+キャッシュ割引や期間限定還元を反映した実請求額とは区別してください。
 
 ### BigQuery を直接見ないとわからないもの
 

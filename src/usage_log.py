@@ -52,6 +52,8 @@ _SCHEMA = [
     bigquery.SchemaField("turn_id", "STRING", mode="REQUIRED"),
     bigquery.SchemaField("model", "STRING"),
     bigquery.SchemaField("prompt_tokens", "INTEGER"),
+    bigquery.SchemaField("cached_input_tokens", "INTEGER"),
+    bigquery.SchemaField("api", "STRING"),
     # output_tokens は課金・UI・週次制限の既存計算と互換性を保つため、
     # これまでと同じ意味（thinking 分を含む合計）のまま変更しない。
     # thinking の内訳だけを別途 thinking_tokens に記録する（診断用、
@@ -211,7 +213,12 @@ class UsageLogger:
                 type_=bigquery.TimePartitioningType.DAY, field="event_time"
             )
             table.clustering_fields = ["user_email", "event_type"]
-            client.create_table(table, exists_ok=True)
+            existing = client.create_table(table, exists_ok=True)
+            fields_present = {field.name for field in existing.schema}
+            missing = [field for field in _SCHEMA if field.name not in fields_present]
+            if missing:
+                existing.schema = [*existing.schema, *missing]
+                client.update_table(existing, ['schema'])
 
             client.create_table(
                 bigquery.Table(self.limits_table_id, schema=_LIMIT_SCHEMA),
@@ -302,6 +309,8 @@ class UsageLogger:
         total_tokens: int,
         thinking_tokens: int = 0,
         model: str | None = None,
+        cached_input_tokens: int = 0,
+        api: str = 'generate_content',
     ) -> None:
         self._insert(
             {
@@ -312,6 +321,8 @@ class UsageLogger:
                 "turn_id": turn_id,
                 "model": model or self.settings.gemini_model,
                 "prompt_tokens": int(prompt_tokens),
+                "cached_input_tokens": int(cached_input_tokens),
+                "api": api,
                 "output_tokens": int(output_tokens),
                 "thinking_tokens": int(thinking_tokens),
                 "total_tokens": int(total_tokens),

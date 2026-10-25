@@ -222,16 +222,54 @@ class BudgetTests(unittest.TestCase):
         ctx = ToolContext(tools=Mock(), settings=settings)
         signed = types.Part(function_call=types.FunctionCall(name='analyze_result', args={'result_id': 'saved', 'operation': 'describe_data'}), thought_signature=b'exact')
         archive = [content('user', '古い質問' * 2000), content('model', '古い回答' * 2000), content('user', '最新の質問'),
-                   types.Content(role='model', parts=[signed]), types.Content(role='user', parts=[types.Part.from_function_response(name='analyze_result', response={'result_id': 'saved', 'result': {'csv': 'value\n' + 'x' * 30000, 'row_count': 1000}})])]
+                   types.Content(role='model', parts=[signed]), types.Content(role='user', parts=[types.Part.from_function_response(name='analyze_result', response={'result_id': 'saved', 'result': {'csv': 'value\n' + 'x' * 1000, 'row_count': 1000}})])]
         before = [c.model_dump() for c in archive]
         request = bound_history(archive, ctx)
         self.assertLessEqual(estimate_tokens([c.model_dump(exclude_none=True) for c in request]), 2000)
         self.assertEqual([c.model_dump() for c in archive], before)
         self.assertIs(request[-2].parts[0], signed)
         self.assertEqual(request[-2].parts[0].thought_signature, b'exact')
+        self.assertIs(request[-1], archive[-1])
         self.assertIn('最新の質問', json.dumps([c.model_dump() for c in request], default=str, ensure_ascii=False))
         with self.assertRaises(ValueError):
             bound_history([content('user', '最新の巨大質問' * 10000)], ctx)
+
+    def test_history_budget_never_discards_unread_latest_tool_result(self):
+        ctx = ToolContext(tools=Mock(), settings=SimpleNamespace(max_history_tokens=2000))
+        response = types.Content(role='user', parts=[types.Part.from_function_response(
+            name='run_query', response={'result_id': 'saved', 'result': {'csv': 'x' * 30000}})])
+        archive = [content('user', '質問'), types.Content(role='model', parts=[
+            types.Part(function_call=types.FunctionCall(name='run_query', args={'sql': 'SELECT 1'}))]), response]
+        before = [c.model_dump() for c in archive]
+        with self.assertRaises(ValueError):
+            bound_history(archive, ctx)
+        self.assertEqual([c.model_dump() for c in archive], before)
+
+    def test_history_budget_counts_binary_signatures_as_sent_base64(self):
+        ctx = ToolContext(tools=Mock(), settings=SimpleNamespace(max_history_tokens=2000))
+        signed = types.Part(function_call=types.FunctionCall(name='list_datasets', args={}),
+                            thought_signature=b'\xff' * 1800)
+        archive = [content('user', '質問'), types.Content(role='model', parts=[signed]),
+                   types.Content(role='user', parts=[types.Part.from_function_response(
+                       name='list_datasets', response={'datasets': ['data']})])]
+        self.assertGreater(estimate_tokens([c.model_dump(exclude_none=True) for c in archive]), 2000)
+        request = bound_history(archive, ctx)
+        self.assertEqual(request, archive)
+        self.assertIs(request[1].parts[0], signed)
+        self.assertEqual(ctx.context_state['last_request']['estimated_tokens_after'],
+                         estimate_tokens([c.model_dump(mode='json', exclude_none=True) for c in archive]))
+
+    def test_history_budget_stops_compacting_once_oldest_result_suffices(self):
+        ctx = ToolContext(tools=Mock(), settings=SimpleNamespace(max_history_tokens=2000))
+        def result(value):
+            return types.Content(role='user', parts=[types.Part.from_function_response(
+                name='run_query', response={'result_id': value, 'result': {'csv': value * 5000}})])
+        first, second = result('a'), result('b')
+        archive = [first, second, content('user', '最新の質問')]
+        request = bound_history(archive, ctx)
+        self.assertTrue(request[0].parts[0].function_response.response['history_data_omitted'])
+        self.assertIs(request[1], second)
+        self.assertLessEqual(estimate_tokens([c.model_dump(exclude_none=True) for c in request]), 2000)
 
 
 class AgentAnalysisTests(unittest.TestCase):

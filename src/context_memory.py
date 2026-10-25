@@ -150,6 +150,9 @@ def accept_note(ctx, value: object) -> str | None:
     if warning or value is None:
         return warning
     state = state_for(ctx)
+    state['current_note'] = {'turn_id': state['turns'][-1]['id'] if state['turns'] else ctx.turn_id,
+                             'summary': factual_summary(value),
+                             'references': list(value.get('references', []))}
     for item in value.get("open_questions", []):
         existing = state["questions"].get(item["id"], {})
         previous = list(existing.get("previous_questions", []))
@@ -326,7 +329,21 @@ def build_request(contents, ctx) -> list[types.Content]:
         request.append(types.Content(role="model", parts=[types.Part.from_text(text="過去の要点を参照し、必要な原結果はrecall_contextで確認します。")]))
     for turn in recent:
         if not turn.get("summary"):
-            request.extend(contents[turn["start"]:turn["end"]])
+            transcript = contents[turn["start"]:turn["end"]]
+            last = transcript[-1] if transcript else None
+            # 通常の文章で完了したターンも、質問・回答原文と結果目録で引き継ぐ。
+            # 途中の説明を最終回答と誤認しないよう、未応答のcallがある履歴は維持する。
+            if (last is not None and last.role == "model" and text_of(last)
+                    and not any(p.function_call for p in last.parts or [])
+                    and any(p.function_call or p.function_response
+                            for c in transcript for p in c.parts or [])):
+                request.append(types.Content(role="user", parts=[types.Part.from_text(text=turn["question"])]))
+                memo = {"turn_id": turn["id"], "answer": text_of(last),
+                        "results": catalogue(state, turn["result_ids"]),
+                        "details_available_via": "recall_context"}
+                request.append(types.Content(role="model", parts=[types.Part.from_text(text=encoded(memo))]))
+            else:
+                request.extend(transcript)
             continue
         request.append(types.Content(role="user", parts=[types.Part.from_text(text=turn["question"])]))
         memo = {"turn_id": turn["id"], "summary": facts_only(state, turn.get("summary") or turn.get("answer", "")[:6000]),
@@ -363,8 +380,8 @@ def build_request(contents, ctx) -> list[types.Content]:
             parts.append(types.Part.from_text(text=encoded(status)))
         request[-1] = request[-1].model_copy(update={"parts": parts})
     # 署名付きmodel Part / functionCallは、現在のターン内では一切変更しない。
-    state["last_request"] = {"original_chars": len(encoded([c.model_dump(exclude_none=True) for c in contents])),
-                             "sent_chars": len(encoded([c.model_dump(exclude_none=True) for c in request])),
+    state["last_request"] = {"original_chars": len(encoded([c.model_dump(mode='json', exclude_none=True) for c in contents])),
+                             "sent_chars": len(encoded([c.model_dump(mode='json', exclude_none=True) for c in request])),
                              "compacted_results": compacted, "recent_turns": len(recent), "older_turns": len(older)}
     from .token_budget import bound_history
     return bound_history(request, ctx)
@@ -398,7 +415,8 @@ def recall(ctx, args: dict) -> dict:
             raise ValueError("searchは1〜120文字のキーワードで指定してください。")
         words = query.casefold().split()
         matches = []
-        for turn in state["turns"][:-1]:
+        # 状態引き継ぎで目録から省略された、進行中のターンの原結果も検索できる。
+        for turn in state["turns"]:
             body = encoded([turn.get("question"), turn.get("summary"), turn.get("answer"), catalogue(state, turn["result_ids"])]).casefold()
             score = sum(word in body for word in words)
             if score:
@@ -406,7 +424,9 @@ def recall(ctx, args: dict) -> dict:
         matches.sort(key=lambda item: (item[0], item[1]["start"]), reverse=True)
         return {"matches": [{"turn_id": turn["id"], "question": turn["question"][:300],
                              "summary": facts_only(state, (turn.get("summary") or turn.get("answer", ""))[:1200]),
-                             "results": catalogue(state, turn["result_ids"][:12]),
+                             "results": sorted(catalogue(state, turn["result_ids"]),
+                                 key=lambda result: sum(word in encoded(result).casefold() for word in words),
+                                 reverse=True)[:12],
                              "result_count": len(turn["result_ids"])} for _, turn in matches[:5]]}
     if targets[0] == "turn_id":
         turn = next((turn for turn in state["turns"] if turn["id"] == args["turn_id"]), None)

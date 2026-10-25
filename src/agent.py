@@ -35,6 +35,7 @@ from .config import Settings, human_bytes, gemini_cost_usd
 from .prompts import SYSTEM_INSTRUCTION, build_system_instruction
 from .sql_guard import SQLGuardError
 from .thinking import DEFAULT_EFFORT
+from . import interactions
 from .usage_log import UsageLogger
 from .execution import ExecutionControl, ExecutionStopped
 from . import context_memory, tool_catalog
@@ -89,6 +90,8 @@ class ToolContext:
     query_cache: dict[str, QueryRun] = field(default_factory=dict)
     context_state: dict[str, Any] = field(default_factory=dict)
     active_tool_names: list[str] = field(default_factory=list)
+    interaction_state: dict[str, Any] = field(default_factory=dict)
+    tool_receipts: dict[str, Any] = field(default_factory=dict)
     analysis_cache: dict[str, Any] = field(default_factory=dict)
     decisions: dict[str, str] = field(default_factory=dict)
     resume_calls: list[Any] | None = None
@@ -138,6 +141,7 @@ class ToolContext:
         return self.session_gemini_cost_usd
 
     def start_turn(self) -> None:
+        self.tool_receipts = {}
         self.turn_runs = []
         self.turn_analyses = []
         self.turn_errors = []
@@ -356,9 +360,13 @@ class GeminiAgent:
         self.thinking_level = thinking_level
         self.deep_analysis = deep_analysis
         self.client = client or genai.Client(
-            vertexai=True,
+            **({'enterprise': True} if interactions.enabled(settings) else {'vertexai': True}),
             project=settings.gcp_project,
             location=settings.vertex_location,
+            **({'http_options': types.HttpOptions(api_version='v1beta1',
+                                                  timeout=getattr(settings, 'gemini_request_timeout_seconds', 120) * 1000,
+                                                  retry_options=types.HttpRetryOptions(attempts=1))}
+               if interactions.enabled(settings) else {}),
         )
         self.declarations = build_declarations()
 
@@ -386,7 +394,7 @@ class GeminiAgent:
         request = context_memory.ensure_user_ending(contents)
         config = self._config(tool_names)
         logger.info("analysis_metrics %s", json.dumps({"event": "llm_request",
-            "selected_tools": tool_names or [], "estimated_history_tokens": estimate_tokens([c.model_dump(exclude_none=True) for c in request]),
+            "selected_tools": tool_names or [], "estimated_history_tokens": estimate_tokens([c.model_dump(mode='json', exclude_none=True) for c in request]),
             "estimated_system_tokens": estimate_tokens(config.system_instruction),
             "estimated_tool_tokens": estimate_tokens([t.model_dump(exclude_none=True) for t in config.tools or []])}))
         try:
@@ -413,6 +421,7 @@ class GeminiAgent:
             # thinking_tokens で内訳を別途残す）
             output_tokens = (usage.candidates_token_count or 0) + thinking_tokens
             total_tokens = usage.total_token_count or 0
+            cached_tokens = getattr(usage, 'cached_content_token_count', None) or 0
             call_cost = gemini_cost_usd(
                 prompt_tokens, output_tokens,
                 model,
@@ -421,7 +430,8 @@ class GeminiAgent:
             ctx.session_gemini_cost_usd = ctx.gemini_cost_usd() + call_cost
             logger.info("analysis_metrics %s", json.dumps({"event": "llm_call", "turn_id": ctx.turn_id,
                 "session_id": ctx.session_id, "selected_tools": ctx.active_tool_names, "model": model,
-                "input_tokens": prompt_tokens, "output_tokens": output_tokens, "llm_calls": 1}))
+                "input_tokens": prompt_tokens, "cached_input_tokens": cached_tokens,
+                "output_tokens": output_tokens, "llm_calls": 1}))
             ctx.turn_prompt_tokens += prompt_tokens
             ctx.turn_output_tokens += output_tokens
             ctx.turn_thinking_tokens += thinking_tokens
@@ -441,6 +451,8 @@ class GeminiAgent:
                     total_tokens=total_tokens,
                     thinking_tokens=thinking_tokens,
                     model=model,
+                    cached_input_tokens=cached_tokens,
+                    api=getattr(ctx.settings, 'gemini_api', 'generate_content'),
                 )
 
     # -- ツール実行 ---------------------------------------------------
@@ -641,6 +653,10 @@ class GeminiAgent:
     def _dispatch(self, call: Any, ctx: ToolContext) -> types.Part:
         name = call.name
         args = dict(call.args or {})
+        receipt_key = (ctx.turn_id + ':' + str(call.id) + ':' + hashlib.sha256(
+            context_memory.encoded([name, args]).encode()).hexdigest()) if getattr(call, 'id', None) else None
+        if receipt_key and receipt_key in ctx.tool_receipts:
+            return types.Part.model_validate(ctx.tool_receipts[receipt_key])
 
         started = time.monotonic()
         try:
@@ -717,6 +733,8 @@ class GeminiAgent:
                 payload = context_memory.register_result(ctx, name, args, payload)
         part = types.Part.from_function_response(name=name, response=payload)
         part.function_response.id = getattr(call, "id", None)
+        if receipt_key:
+            ctx.tool_receipts[receipt_key] = part.model_dump(mode='json', exclude_none=True)
         return part
 
     @staticmethod
@@ -803,7 +821,11 @@ class GeminiAgent:
                 if on_progress is not None and not processed_tools and not ctx.turn_runs:
                     on_progress("質問に合う調べ方を考えています…")
                 try:
-                    response = self._generate(context_memory.build_request(contents, ctx), tool_names=list(ctx.active_tool_names))
+                    if interactions.enabled(self.settings):
+                        response = interactions.generate(self.client, contents, ctx,
+                            self._config(list(ctx.active_tool_names)))
+                    else:
+                        response = self._generate(context_memory.build_request(contents, ctx), tool_names=list(ctx.active_tool_names))
                 except Exception as exc:  # noqa: BLE001 - 記録してから同じ例外を上に伝える
                     if ctx.execution_control is not None:
                         ctx.execution_control.check()
