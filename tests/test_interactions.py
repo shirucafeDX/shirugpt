@@ -41,6 +41,11 @@ def output(text):
     return {'type':'model_output','content':[{'type':'text','text':text}]}
 
 
+def final_call(answer, sql='SELECT 1'):
+    return call('finish_answer', {'answer': answer, 'conversation_summary': answer,
+        'context_note': {'summary': answer, 'references': [memory.result_id_for('run_query', {'sql': sql})]}})
+
+
 def interaction(identifier, steps, *, input_tokens=100, output_tokens=10, thought_tokens=20,
                 cached_tokens=30, status=None):
     return {'id':identifier, 'status':status or ('requires_action' if any(s['type']=='function_call' for s in steps) else 'completed'),
@@ -54,7 +59,7 @@ class InteractionTests(unittest.TestCase):
         self.settings = settings()
         self.ctx = ToolContext(tools=Mock(), settings=self.settings, usage_logger=Mock())
         self.ctx.tools.list_datasets.return_value = {'datasets': [{'dataset':'data'}]}
-        self.contents = [user('売上を調べて')]
+        self.contents = [user('利用可能なデータセットを教えて')]
 
     def sdk(self, replies):
         self.requests = []
@@ -81,7 +86,7 @@ class InteractionTests(unittest.TestCase):
             agent.run(self.contents, self.ctx)
         first, second, third, fourth = self.requests
         self.assertNotIn('previous_interaction_id',first)
-        self.assertEqual(first['input'][0]['content'][0]['text'],'売上を調べて')
+        self.assertEqual(first['input'][0]['content'][0]['text'],'利用可能なデータセットを教えて')
         self.assertEqual([t['name'] for t in first['tools']],['select_tools'])
         self.assertEqual(second['previous_interaction_id'],'state-1')
         self.assertEqual([t['name'] for t in second['tools']],['select_tools','list_datasets'])
@@ -188,7 +193,7 @@ class InteractionTests(unittest.TestCase):
         client=Mock()
         client.interactions.create.side_effect=[interaction('state-1',[call('run_query',{'sql':'SELECT 1'},'q1'),
                                                                      call('run_query',{'sql':'SELECT 2'},'q2')]),
-                                                interaction('state-2',[output('完了')])]
+                                                interaction('state-2',[final_call('完了')])]
         frame=pd.DataFrame({'value':[1]})
         run=QueryRun('SELECT 1','SELECT 1',1,1,frame,{'row_count':1})
         self.ctx.tools.run_query.side_effect=[run,ConfirmationRequired('SELECT 2',20,10,[]),run]
@@ -228,7 +233,7 @@ class InteractionTests(unittest.TestCase):
     def test_restore_pending_batch_keeps_receipts_and_original_call_ids(self):
         client=Mock()
         client.interactions.create.side_effect=[interaction('state-1',[call('list_datasets',call_id='first'),
-            call('run_query',{'sql':'SELECT 1'},'expensive')]),interaction('state-2',[output('完了')])]
+            call('run_query',{'sql':'SELECT 1'},'expensive')]),interaction('state-2',[final_call('完了')])]
         self.ctx.tools.run_query.side_effect=ConfirmationRequired('SELECT 1',20,10,[])
         agent=GeminiAgent(self.settings,client=client)
         pending=agent.run(self.contents,self.ctx)
@@ -327,6 +332,26 @@ class InteractionTests(unittest.TestCase):
         self.assertIsNone(restored.resume_calls)
         self.assertEqual(restored.interaction_state,{})
 
+    def test_rejected_prose_keeps_state_id_and_original_response_prefix(self):
+        from src.analysis_safety import BLOCKED_ANSWER
+        frame = pd.DataFrame({'value': [1]})
+        self.ctx.tools.run_query.return_value = QueryRun('SELECT 1', 'SELECT 1', 1, 1, frame, {'row_count': 1})
+        replies = [interaction('safe-1', [call('run_query', {'sql': 'SELECT 1'})]),
+                   interaction('safe-2', [output('来店数は999件です')]),
+                   interaction('safe-3', [output('再確認が必要です')])]
+        with self.sdk(replies) as client:
+            agent = GeminiAgent(self.settings, client=client)
+            self.assertEqual(agent.run(self.contents, self.ctx).text, BLOCKED_ANSWER)
+            self.ctx.start_turn()
+            self.contents.append(user('続けて'))
+            agent.run(self.contents, self.ctx)
+        self.assertEqual(self.requests[2]['previous_interaction_id'], 'safe-2')
+        self.assertEqual(self.requests[2]['input'][0]['type'], 'model_output')
+        self.assertEqual(self.requests[2]['input'][0]['content'][0]['text'], BLOCKED_ANSWER)
+        self.assertEqual(self.requests[2]['input'][1]['content'][0]['text'], '続けて')
+        self.assertNotIn('999', json.dumps(self.requests[2]['input'], ensure_ascii=False))
+        self.ctx.tools.run_query.assert_called_once()
+
     def test_current_turn_result_can_be_found_after_catalogue_is_shortened(self):
         memory.sync_turns(self.contents,self.ctx)
         for i in range(15):
@@ -338,12 +363,12 @@ class InteractionTests(unittest.TestCase):
         self.assertEqual(found[0]['turn_id'],self.ctx.context_state['turns'][0]['id'])
         self.assertIn(rid,[r['result_id'] for r in found[0]['results']])
 
-    def test_csv_is_sent_once_with_original_values_then_followup_is_only_new_text(self):
+    def test_csv_is_sent_once_then_followup_sends_final_ack_and_new_text(self):
         frame=pd.DataFrame({'value':[1,2]})
         self.ctx.tools.run_query.return_value=QueryRun('SELECT 1','SELECT 1',1,1,frame,{'row_count':2})
         self.ctx.active_tool_names=['run_query']
         replies=[interaction('state-1',[call('run_query',{'sql':'SELECT 1'})]),
-                 interaction('state-2',[output('合計は3')]),interaction('state-3',[output('説明')])]
+                 interaction('state-2',[final_call('合計は3')]),interaction('state-3',[output('説明')])]
         with self.sdk(replies) as client:
             agent=GeminiAgent(self.settings,client=client)
             agent.run(self.contents,self.ctx)
@@ -352,8 +377,10 @@ class InteractionTests(unittest.TestCase):
         data=json.loads(self.requests[1]['input'][0]['result'])['result']
         self.assertEqual(data['csv'],'value\n1\n2\n')
         self.assertEqual(data['sent_row_count'],2)
-        self.assertEqual(len(self.requests[2]['input']),1)
-        self.assertEqual(self.requests[2]['input'][0]['content'][0]['text'],'説明して')
+        self.assertEqual(len(self.requests[2]['input']),2)
+        self.assertEqual(self.requests[2]['input'][0]['type'], 'function_result')
+        self.assertEqual(self.requests[2]['input'][0]['name'], 'finish_answer')
+        self.assertEqual(self.requests[2]['input'][-1]['content'][0]['text'],'説明して')
         self.ctx.tools.run_query.assert_called_once()
 
     def test_clarification_answer_continues_same_state_without_duplicate_question_text(self):

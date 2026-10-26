@@ -197,7 +197,12 @@ def _create(api, body, ctx, on_progress):
                 'turn_id': ctx.turn_id, 'attempt': attempt + 1, 'wait_seconds': round(delay, 3)}))
             if on_progress is not None:
                 on_progress(f'AIが混み合っています。{math.ceil(delay)}秒待って再試行します（{attempt + 1}/{RATE_LIMIT_RETRIES}）…')
-            _wait_for_retry(ctx, delay)
+            retry_started = time.monotonic()
+            try:
+                _wait_for_retry(ctx, delay)
+            finally:
+                ctx.turn_events.append({'event': 'retry_wait', 'attempt': attempt + 1,
+                                        'seconds': round(time.monotonic() - retry_started, 6)})
         else:
             if attempt and on_progress is not None:
                 try:
@@ -229,7 +234,7 @@ def _response(interaction):
     if usage is not None:
         # Interactionsも出力本文とthoughtsを別に返す。既存経路で合算する。
         output = _get(usage, 'total_output_tokens', 0) or 0
-        thoughts = _get(usage, 'total_thought_tokens', 0) or 0
+        thoughts = _get(usage, 'total_thought_tokens', None)
         metadata = types.GenerateContentResponseUsageMetadata(
             prompt_token_count=_get(usage, 'total_input_tokens', 0) or 0,
             candidates_token_count=output, thoughts_token_count=thoughts,

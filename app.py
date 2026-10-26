@@ -10,14 +10,17 @@ import json
 import logging
 import os
 import tempfile
+import time
 import uuid
 from zoneinfo import ZoneInfo
 from typing import Any
 
+import pandas as pd
 import streamlit as st
 from google.genai import types
 
 from src.admin_page import render_admin_page
+from src import analysis_safety
 from src.agent import (
     AnswerResult,
     ClarificationResult,
@@ -528,7 +531,8 @@ def render_chart(df, spec: ChartSpec, key_prefix: str) -> None:
 def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> None:
     runs = message.get("runs") or []
     analyses = message.get("analyses") or []
-    if not runs and not analyses:
+    events = message.get("execution_events") or []
+    if not runs and not analyses and not events and not message.get("turn_id") and not message.get("errors"):
         return
     plan = choose_presentation(message.get("question", ""), runs, shown)
     if message.get("is_error") or message.get("is_stopped"):
@@ -546,6 +550,41 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
 
     # 回答に使った結果と途中結果を、必要なときだけ確認できるようにする。
     with st.expander("データ・実行詳細"):
+        if message.get("turn_id"):
+            st.caption(f"ターンID: {message['turn_id']}")
+        if message.get("elapsed_seconds") is not None:
+            st.caption(f"処理時間（確認待ちを含む）: {message['elapsed_seconds']:.2f} 秒")
+        if events:
+            rows = []
+            for event in events:
+                rows.append({"処理": event.get("tool") or event.get("event"),
+                             "開始日時": event.get("started_at"), "秒": event.get("seconds"), "状態": event.get("status", ""), "エラー": event.get("error", False),
+                             "入力トークン": event.get("input_tokens"), "出力トークン": event.get("output_tokens"),
+                             "思考トークン": event.get("thinking_tokens"), "キャッシュ入力": event.get("cached_input_tokens")})
+            st.dataframe(pd.DataFrame(rows), hide_index=True)
+            st.caption("AI呼び出し時間は通信・再試行待機を含みます。再試行待機の行はAI呼び出し時間の内数です。空欄は未取得です。モデル内部の思考時間は取得できません。")
+        summary = message.get("execution_summary") or {}
+        if summary:
+            with st.expander("引き継ぎ要約"):
+                if summary.get("execution_note"):
+                    st.write("実行状態の要約", summary["execution_note"])
+                if summary.get("summary"):
+                    st.write("今回の要約", summary["summary"])
+                if summary.get("conversation_summary"):
+                    st.write("会話全体の要約", summary["conversation_summary"])
+                note = summary.get("context_note") or {}
+                if note.get("summary"):
+                    st.write("AIの作業メモ（解釈）", note["summary"])
+                    if note.get("references"):
+                        st.caption("参照結果ID: " + ", ".join(note["references"]))
+                for step in summary.get("steps", []):
+                    st.text(f"{step['tool']}: {step['status']}" + (f" · {step['result_id']}" if step.get('result_id') else ""))
+                    if step.get("error"):
+                        st.text(step["error"])
+                if summary.get("next_action"):
+                    st.write("次の行動", summary["next_action"])
+        for error in message.get("errors") or []:
+            st.text(error)
         for idx, run in enumerate(runs):
             with st.expander(run.purpose or f"クエリ {idx + 1}"):
                 if not (plan.mode == "table" and idx == plan.index):
@@ -793,6 +832,12 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
                 "errors": list(ctx.turn_errors),
                 "is_error": True,
             }
+        )
+    if st.session_state.messages and st.session_state.messages[-1].get("role") == "assistant":
+        st.session_state.messages[-1].update(
+            turn_id=ctx.turn_id, execution_events=list(ctx.turn_events),
+            elapsed_seconds=max(0, time.time() - ctx.turn_started_at) if ctx.turn_started_at else None,
+            execution_summary=analysis_safety.snapshot(ctx),
         )
     st.session_state.pop("active_turn", None)
     save_conversation(ctx)

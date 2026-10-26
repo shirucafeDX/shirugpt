@@ -152,7 +152,7 @@ def load_settings() -> Settings:
             "GCP_PROJECT_ID が未設定です。.env.example を .env にコピーして値を設定してください。"
         )
 
-    default_dataset = _str("BQ_DEFAULT_DATASET")
+    default_dataset = _str("BQ_DEFAULT_DATASET", "202506")
     allowed = _csv("BQ_ALLOWED_DATASETS", default_dataset)
     if not allowed:
         raise ConfigError(

@@ -167,7 +167,12 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.contents[-1].parts[0].text, answer.text)
 
     def test_confirmation_resume_does_not_duplicate_call_or_rebill(self):
-        self.agent._generate = Mock(side_effect=[response('', call='run_query'), response('完了')])
+        final = response('', call='finish_answer')
+        from src import context_memory
+        final.candidates[0].content.parts[0].function_call.args = {
+            'answer': '完了', 'conversation_summary': '結果を確認した',
+            'context_note': {'summary': '結果を確認した', 'references': [context_memory.result_id_for('run_query', {'sql': 'SELECT 1'})]}}
+        self.agent._generate = Mock(side_effect=[response('', call='run_query'), final])
         self.tools.run_query.side_effect = [
             ConfirmationRequired('SELECT 1', 'SELECT 1', 100, 10),
             QueryRun('SELECT 1', 'SELECT 1', 100, 100, pd.DataFrame({'n': [1]}), {}),
@@ -179,10 +184,10 @@ class AgentTests(unittest.TestCase):
         progress = []
         answer = self.agent.run(self.contents, self.ctx, on_progress=progress.append)
         self.assertEqual(progress[0], 'データを取得・集計しています…')
-        self.assertTrue(progress[-1].startswith('データを取得・集計しています'))
+        self.assertEqual(progress[-1], '回答を作成しています…')
         self.assertFalse(any('回答をまとめ' in text or '分析を進め' in text for text in progress))
         self.assertEqual(answer.text, '完了')
-        self.assertEqual([c.role for c in self.contents], ['user', 'model', 'user', 'model'])
+        self.assertEqual([c.role for c in self.contents], ['user', 'model', 'user', 'model', 'user', 'model'])
         self.assertEqual(self.ctx.session_billed_bytes, 100)
         self.logger.log_bq_query.assert_called_once()
 

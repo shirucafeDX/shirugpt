@@ -129,7 +129,8 @@ class MemoryTests(unittest.TestCase):
         wire = memory.encoded([c.model_dump(exclude_none=True) for c in request])
         self.assertEqual(request[0].parts[0].text, self.contents[0].parts[0].text)
         memo = json.loads(request[1].parts[0].text)
-        self.assertEqual(memo['answer'], '回答')
+        from src.analysis_safety import BLOCKED_ANSWER
+        self.assertEqual(memo['answer'], BLOCKED_ANSWER)
         self.assertIn(self.rid, [item['result_id'] for item in memo['results']])
         self.assertNotIn(self.sql, wire)
         self.assertNotIn('function_call', wire)

@@ -169,6 +169,9 @@ class PresentationTests(unittest.TestCase):
         ctx.tools.run_query.return_value = result
         agent = GeminiAgent(settings, client=Mock())
         original_chart = {'kind': 'bar', 'x': '店舗', 'y': ['来店数']}
+        settings.allowed_datasets = ('data',)
+        settings.gcp_project = 'test'
+        settings.default_row_limit = 1000
         agent._run_query({'sql': result.sql, 'chart': original_chart}, ctx)
         previous = list(ctx.turn_runs)
         ctx.start_turn()
@@ -201,7 +204,7 @@ class Agent:
 
 st.session_state.messages = [{'role': 'user', 'text': '店舗別の来店数は？'}]
 st.session_state.contents = []
-ctx = SimpleNamespace(turn_runs=[], turn_errors=[], usage_logger=None)
+ctx = SimpleNamespace(turn_runs=[], turn_errors=[], usage_logger=None, turn_id='test-turn', turn_events=[], turn_started_at=0, context_state={}, schema_cache={})
 with patch('app.save_conversation'), patch('app.st.rerun'):
     process_turn(Agent(), ctx)
 '''

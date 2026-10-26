@@ -108,6 +108,8 @@ def validate_note(ctx, value: object) -> str | None:
         return f"context_note.summaryは1〜{NOTE_CHARS}文字で指定してください。"
     if not isinstance(refs, list) or len(refs) > 12 or any(not isinstance(ref, str) or ref not in state["results"] for ref in refs):
         return "context_note.referencesには受け取ったresult_idだけを指定してください。"
+    if any(state['results'][ref].get('payload', {}).get('error') for ref in refs):
+        return "失敗した結果IDを確定事実の根拠にできません。成功した保存結果を参照してください。"
     questions = state["questions"]
     turn_id = state["turns"][-1]["id"] if state["turns"] else ctx.turn_id
     updates, resolved = value.get("open_questions", []), value.get("resolved_questions", [])

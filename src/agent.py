@@ -33,9 +33,9 @@ from .bq_tools import (
 )
 from .config import Settings, human_bytes, gemini_cost_usd
 from .prompts import SYSTEM_INSTRUCTION, build_system_instruction
-from .sql_guard import SQLGuardError
+from .sql_guard import SQLGuardError, check_sql
 from .thinking import DEFAULT_EFFORT
-from . import interactions
+from . import interactions, analysis_safety
 from .usage_log import UsageLogger
 from .execution import ExecutionControl, ExecutionStopped
 from . import context_memory, tool_catalog
@@ -123,6 +123,8 @@ class ToolContext:
     user_email: str = ""
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     turn_id: str = ""
+    turn_events: list[dict[str, Any]] = field(default_factory=list)
+    turn_started_at: float = 0.0
 
     # 月次の使用制限判定用ベースライン（app.py 側で更新する。ロジックは
     # ここには置かない。BigQuery への問い合わせを毎ターン避けるため、
@@ -141,6 +143,8 @@ class ToolContext:
         return self.session_gemini_cost_usd
 
     def start_turn(self) -> None:
+        self.turn_events = []
+        self.turn_started_at = time.time()
         self.tool_receipts = {}
         self.turn_runs = []
         self.turn_analyses = []
@@ -371,9 +375,12 @@ class GeminiAgent:
         self.declarations = build_declarations()
 
     # -- 生成 ---------------------------------------------------------
-    def _config(self, tool_names: list[str] | None = None) -> types.GenerateContentConfig:
+    def _config(self, tool_names: list[str] | None = None, ctx: ToolContext | None = None) -> types.GenerateContentConfig:
         kwargs: dict[str, Any] = {
-            "system_instruction": build_system_instruction(tool_names, deep_analysis=self.deep_analysis),
+            "system_instruction": build_system_instruction(tool_names, deep_analysis=self.deep_analysis) + (
+                f"\n既定の分析対象はデータセット {self.settings.default_dataset}。別の指定がなければこれを使い、list_datasetsで探し直さない。"
+                if getattr(self.settings, "default_dataset", "") else "") + (
+                analysis_safety.request_context(ctx, tool_names) if ctx is not None else ""),
             "tools": [types.Tool(function_declarations=tool_catalog.active_declarations(self.declarations, tool_names))],
             "temperature": 0.1,
             "automatic_function_calling": types.AutomaticFunctionCallingConfig(
@@ -390,9 +397,9 @@ class GeminiAgent:
             )
         return types.GenerateContentConfig(**kwargs)
 
-    def _generate(self, contents: list[types.Content], *, tool_names: list[str] | None = None):
+    def _generate(self, contents: list[types.Content], *, tool_names: list[str] | None = None, ctx: ToolContext | None = None):
         request = context_memory.ensure_user_ending(contents)
-        config = self._config(tool_names)
+        config = self._config(tool_names, ctx)
         logger.info("analysis_metrics %s", json.dumps({"event": "llm_request",
             "selected_tools": tool_names or [], "estimated_history_tokens": estimate_tokens([c.model_dump(mode='json', exclude_none=True) for c in request]),
             "estimated_system_tokens": estimate_tokens(config.system_instruction),
@@ -491,6 +498,9 @@ class GeminiAgent:
             warning = context_memory.validate_note(ctx, note)
             if warning or note is None:
                 raise BQToolError(warning or "context_noteを指定してください。")
+            evidence_error = analysis_safety.validate_answer(ctx, note)
+            if evidence_error:
+                raise BQToolError(evidence_error)
             return {"status": "final_answer", "answer": answer.strip(),
                     "summary": context_memory.factual_summary(note), "overview": overview.strip()}
 
@@ -527,20 +537,21 @@ class GeminiAgent:
             return ctx.listing_cache["datasets"]
 
         if name == "list_tables":
-            dataset = str(args.get("dataset", "")).strip()
+            dataset = str(args.get("dataset") or getattr(ctx.settings, "default_dataset", "")).strip()
             cache_key = f"tables:{dataset}"
             if cache_key not in ctx.listing_cache:
                 ctx.listing_cache[cache_key] = ctx.tools.list_tables(dataset)
             return ctx.listing_cache[cache_key]
 
         if name == "get_table_schema":
-            dataset = str(args.get("dataset", "")).strip()
+            dataset = str(args.get("dataset") or getattr(ctx.settings, "default_dataset", "")).strip()
             table = str(args.get("table", "")).strip()
             cache_key = f"{dataset}.{table}"
             if cache_key in ctx.schema_cache:
                 cached = dict(ctx.schema_cache[cache_key])
                 cached["cached"] = True
                 return cached
+            self._require_known_table(ctx, dataset, table)
             schema = ctx.tools.get_table_schema(dataset, table)
             ctx.schema_cache[cache_key] = schema
             return schema
@@ -549,6 +560,44 @@ class GeminiAgent:
             return self._run_query(args, ctx)
 
         raise BQToolError(f"未知のツール「{name}」が呼び出されました。")
+
+    def _prefetch_schemas(self, contents, ctx):
+        question = next((context_memory.text_of(c) for c in reversed(contents) if context_memory.is_question(c)), '')
+        current = analysis_safety.state(ctx)
+        current['question'] = question
+        current['data_requested'] = current['data_requested'] or analysis_safety.is_data_question(question)
+        dataset = getattr(ctx.settings, 'default_dataset', '')
+        if not isinstance(dataset, str) or not dataset or not current['data_requested']:
+            return
+        key = f'tables:{dataset}'
+        known = {'tables': [{'table': key.split('.', 1)[1]} for key in ctx.schema_cache if key.startswith(dataset + '.')]}
+        if key not in ctx.listing_cache and analysis_safety.likely_tables(question, known):
+            for table in analysis_safety.likely_tables(question, known):
+                schema_key = f'{dataset}.{table}'
+                current['schema_keys'] = [item for item in current['schema_keys'] if item != schema_key] + [schema_key]
+            return
+        if key not in ctx.listing_cache:
+            part = self._dispatch(types.FunctionCall(name='list_tables', args={'dataset': dataset}), ctx)
+            if part.function_response.response.get('error'):
+                return
+        for table in analysis_safety.likely_tables(question, ctx.listing_cache[key]):
+            if ctx.execution_control is not None:
+                ctx.execution_control.check()
+            if f'{dataset}.{table}' not in ctx.schema_cache:
+                self._dispatch(types.FunctionCall(name='get_table_schema', args={'dataset': dataset, 'table': table}), ctx)
+
+    def _require_known_table(self, ctx, dataset, table):
+        # スキーマが保存済みなら実在確認済み。一覧の取り直しは不要。
+        if f"{dataset}.{table}" in ctx.schema_cache:
+            return
+        key = f"tables:{dataset}"
+        if key not in ctx.listing_cache:
+            part = self._dispatch(types.FunctionCall(name='list_tables', args={'dataset': dataset}), ctx)
+            if part.function_response.response.get('error'):
+                raise BQToolError(part.function_response.response['error'])
+        tables = ctx.listing_cache[key]["tables"]
+        if table not in {item["table"] for item in tables}:
+            raise BQToolError(f"テーブル {table!r} は確認した一覧にありません。推測せず一覧の正確な名前を使ってください: {tables}")
 
     def _run_query(self, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         sql = str(args.get("sql", "")).strip()
@@ -580,6 +629,22 @@ class GeminiAgent:
                     "別のクエリを作り直してください。"
                 )
             }
+
+        failed = analysis_safety.state(ctx)['failures'].get(analysis_safety.query_key(sql))
+        if failed:
+            raise BQToolError(f"同じSQLは失敗済みのため再実行しません。前回のエラー: {failed}。確認済みスキーマと照合してSQLを修正してください。")
+
+        guard = check_sql(sql, project=getattr(ctx.settings, "gcp_project", ""),
+                          allowed_datasets=getattr(ctx.settings, "allowed_datasets", ()),
+                          default_row_limit=getattr(ctx.settings, "default_row_limit", 1000))
+        for reference in guard.referenced_tables:
+            _, dataset, table = reference.split(".", 2)
+            self._require_known_table(ctx, dataset, table)
+            if f"{dataset}.{table}" not in ctx.schema_cache:
+                schema_part = self._dispatch(types.FunctionCall(name='get_table_schema', args={'dataset': dataset, 'table': table}), ctx)
+                if schema_part.function_response.response.get('error'):
+                    raise BQToolError(schema_part.function_response.response['error'])
+        analysis_safety.verify_columns(sql, guard.referenced_tables, ctx.schema_cache)
 
         purpose = str(args.get("purpose", "")).strip()
         approved = ctx.decisions.get(key) == "approved"
@@ -659,11 +724,13 @@ class GeminiAgent:
             return types.Part.model_validate(ctx.tool_receipts[receipt_key])
 
         started = time.monotonic()
+        started_at = datetime.now().astimezone().isoformat()
         try:
             payload = self._call_tool(name, args, ctx)
-        except ExecutionStopped:
-            raise
-        except _Pending:
+        except (ExecutionStopped, _Pending) as exc:
+            ctx.turn_events.append({"event": "agent_tool", "tool": name, "started_at": started_at,
+                                    "seconds": round(time.monotonic() - started, 6),
+                                    "status": "stopped" if isinstance(exc, ExecutionStopped) else "confirmation_required"})
             raise
         except (SQLGuardError, BQToolError) as exc:
             if ctx.execution_control is not None:
@@ -707,7 +774,7 @@ class GeminiAgent:
         result = payload.get("result", {})
         source_rows = payload.get("source_row_count", result.get("row_count", 0)) if isinstance(result, dict) else 0
         event = {"event": "agent_tool", "session_id": ctx.session_id, "turn_id": ctx.turn_id,
-                 "tool": name, "selected_tools": list(ctx.active_tool_names),
+                 "tool": name, "started_at": started_at, "selected_tools": list(ctx.active_tool_names),
                  "original_query": (context_memory.state_for(ctx)["turns"][-1].get("question", "") if context_memory.state_for(ctx)["turns"] else ""),
                  "generated_sql": args.get("sql"), "analysis_operation": args.get("operation"),
                  "seconds": round(time.monotonic() - started, 6), "rows_before": source_rows,
@@ -723,6 +790,7 @@ class GeminiAgent:
             event["estimated_tokens_before"] = payload.get("estimated_tokens_before", result.get("estimated_tokens_before"))
         logger.info("analysis_metrics %s", json.dumps(event, ensure_ascii=False, default=str))
         state = context_memory.state_for(ctx)
+        ctx.turn_events.append(event)
         state.setdefault("analysis_events", []).append(event)
         state["analysis_events"] = state["analysis_events"][-100:]
         if not payload.get("error") and name != tool_catalog.SELECT_TOOL:
@@ -731,6 +799,7 @@ class GeminiAgent:
                 payload = {**payload, "context_note_warning": warning}
             if name != "finish_answer":
                 payload = context_memory.register_result(ctx, name, args, payload)
+        analysis_safety.record(ctx, name, args, payload)
         part = types.Part.from_function_response(name=name, response=payload)
         part.function_response.id = getattr(call, "id", None)
         if receipt_key:
@@ -810,6 +879,7 @@ class GeminiAgent:
                                      thinking_level=ctx.active_thinking_level, deep_analysis=ctx.thinking_enabled)
             return turn_agent.run(contents, ctx, on_progress=on_progress)
         context_memory.sync_turns(contents, ctx)
+        self._prefetch_schemas(contents, ctx)
         pending_calls = ctx.resume_calls
         ctx.resume_calls = None
         processed_tools = False
@@ -820,12 +890,14 @@ class GeminiAgent:
             if pending_calls is None:
                 if on_progress is not None and not processed_tools and not ctx.turn_runs:
                     on_progress("質問に合う調べ方を考えています…")
+                request_event = {"event": "llm_call", "started_at": datetime.now().astimezone().isoformat(), "error": True}
+                request_started = time.monotonic()
                 try:
                     if interactions.enabled(self.settings):
                         response = interactions.generate(self.client, contents, ctx,
-                            self._config(list(ctx.active_tool_names)), on_progress=on_progress)
+                            self._config(list(ctx.active_tool_names), ctx), on_progress=on_progress)
                     else:
-                        response = self._generate(context_memory.build_request(contents, ctx), tool_names=list(ctx.active_tool_names))
+                        response = self._generate(context_memory.build_request(contents, ctx), tool_names=list(ctx.active_tool_names), ctx=ctx)
                 except Exception as exc:  # noqa: BLE001 - 記録してから同じ例外を上に伝える
                     if ctx.execution_control is not None:
                         ctx.execution_control.check()
@@ -839,6 +911,14 @@ class GeminiAgent:
                             error_text=technical_detail(exc, limit=10_000),
                         )
                     raise
+                finally:
+                    request_event["seconds"] = round(time.monotonic() - request_started, 6)
+                    ctx.turn_events.append(request_event)
+                request_event["error"] = False
+                usage = response.usage_metadata
+                if usage is not None:
+                    request_event.update(input_tokens=usage.prompt_token_count, output_tokens=usage.candidates_token_count,
+                                         thinking_tokens=usage.thoughts_token_count, cached_input_tokens=getattr(usage, "cached_content_token_count", None))
                 self._record_usage(ctx, response, getattr(self.settings, "gemini_model", "gemini-2.5-flash"))
                 if ctx.execution_control is not None:
                     ctx.execution_control.check()
@@ -863,7 +943,7 @@ class GeminiAgent:
                     source = "output_limit" if reason == "MAX_TOKENS" else "model_response_error"
                     self._record_generation_issue(ctx, source, "モデルが正常終了しませんでした。", response, reason)
                     # 不完全な function_call は実行しない。
-                    if reason == "MAX_TOKENS" and text:
+                    if reason == "MAX_TOKENS" and text and not analysis_safety.needs_evidence(ctx):
                         message = text + "\n\n※ 出力トークン上限に達したため、回答は途中で打ち切られています。"
                         content = candidate.content.model_copy(update={
                             "parts": [*[p for p in parts if not p.function_call], types.Part.from_text(text="出力トークン上限に達したため、回答は途中で打ち切られています。")]
@@ -877,6 +957,13 @@ class GeminiAgent:
                     return self._answer(contents, message, ctx=ctx)
 
                 if not calls:
+                    if text and analysis_safety.needs_evidence(ctx):
+                        ctx.turn_errors.append('finish_answerによる実行結果の参照確認を経ていない分析回答を非表示にしました。')
+                        analysis_safety.state(ctx)['next_action'] = '成功した保存結果のIDを確認し、根拠を参照した回答を作り直す。'
+                        analysis_safety.state(ctx)['steps'].append({'tool': 'answer_validation', 'status': 'failed', 'error': 'finish_answerによる根拠の参照確認がありません。'})
+                        # APIが返した元の応答は保持し、状態IDの署名・カーソルを壊さない。
+                        contents.append(candidate.content)
+                        return self._answer(contents, analysis_safety.BLOCKED_ANSWER, ctx=ctx)
                     if not text:
                         self._record_generation_issue(ctx, "empty_response", "text も function_call も返りませんでした。", response, reason)
                     return self._answer(

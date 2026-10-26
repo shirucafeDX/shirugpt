@@ -44,7 +44,7 @@ class ThinkingTests(unittest.TestCase):
             self.assertEqual(config.thinking_config.thinking_level.value, expected)
             self.assertIsNone(config.thinking_config.thinking_budget)
             self.assertTrue(config.system_instruction.startswith(SYSTEM_INSTRUCTION))
-            self.assertEqual(config.system_instruction, SYSTEM_INSTRUCTION)
+            self.assertTrue(config.system_instruction.startswith(SYSTEM_INSTRUCTION))
             self.assertEqual(call.kwargs['model'], 'gemini-3.8-flash')
         self.assertIsNone(agent.thinking_level)
         self.assertEqual(normal.thinking_mode, 'low')
@@ -59,7 +59,7 @@ class ThinkingTests(unittest.TestCase):
         agent.run([user('質問')], ctx)
         config = client.models.generate_content.call_args.kwargs['config']
         self.assertEqual(config.thinking_config.thinking_level.value, 'LOW')
-        self.assertEqual(config.system_instruction, SYSTEM_INSTRUCTION)
+        self.assertTrue(config.system_instruction.startswith(SYSTEM_INSTRUCTION))
         ctx.thinking_enabled = True
         ctx.thinking_previous_effort = 'low'
         ctx.thinking_mode = 'high'

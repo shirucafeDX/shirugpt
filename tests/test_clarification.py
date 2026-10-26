@@ -36,6 +36,7 @@ class ClarificationTests(unittest.TestCase):
 
     def test_clarification_waits_until_schema_is_known(self):
         self.ctx.schema_cache.clear()
+        self.ctx.tools.list_tables.return_value = {"tables": [{"table": "来店"}]}
         self.ctx.tools.get_table_schema.return_value = {'columns': [{'name': 'store', 'type': 'STRING'}]}
         schema_call = types.FunctionCall(name='get_table_schema', args={'dataset': 'data', 'table': '来店'})
         self.agent._generate = Mock(side_effect=[reply(self.call), reply(schema_call), reply(self.call)])

@@ -29,7 +29,7 @@ CONTEXT_FIELDS = (
     'session_thinking_tokens',
     'thinking_mode', 'active_thinking_level', 'session_gemini_cost_usd',
     'thinking_enabled', 'thinking_previous_effort',
-    'session_id', 'turn_id',
+    'session_id', 'turn_id', 'turn_events', 'turn_started_at',
 )
 
 
