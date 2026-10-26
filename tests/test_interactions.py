@@ -86,10 +86,10 @@ class InteractionTests(unittest.TestCase):
         self.assertEqual(second['previous_interaction_id'],'state-1')
         self.assertEqual([t['name'] for t in second['tools']],['select_tools','list_datasets'])
         self.assertEqual(second['input'][0]['call_id'],'select_tools')
-        self.assertEqual(second['input'][0]['result']['available_tools'],['list_datasets'])
+        self.assertEqual(json.loads(second['input'][0]['result'])['available_tools'],['list_datasets'])
         self.assertEqual(third['previous_interaction_id'],'state-2')
         self.assertEqual(len(third['input']),1)
-        self.assertIn('datasets',third['input'][0]['result'])
+        self.assertIn('datasets',json.loads(third['input'][0]['result']))
         self.assertEqual(fourth['previous_interaction_id'],'state-3')
         self.assertEqual(fourth['input'],[{'type':'user_input','content':[{'type':'text','text':'続けて'}]}])
         self.assertTrue(all(r['store'] for r in self.requests))
@@ -223,7 +223,7 @@ class InteractionTests(unittest.TestCase):
         sent=client.interactions.create.call_args.kwargs
         self.assertEqual(sent['previous_interaction_id'],'state-1')
         self.assertEqual([v['type'] for v in sent['input']],['function_result','user_input'])
-        self.assertEqual(sent['input'][0]['result']['answer'],'最終回答です')
+        self.assertEqual(json.loads(sent['input'][0]['result'])['answer'],'最終回答です')
 
     def test_restore_pending_batch_keeps_receipts_and_original_call_ids(self):
         client=Mock()
@@ -349,7 +349,7 @@ class InteractionTests(unittest.TestCase):
             agent.run(self.contents,self.ctx)
             self.contents.append(user('説明して'))
             agent.run(self.contents,self.ctx)
-        data=self.requests[1]['input'][0]['result']['result']
+        data=json.loads(self.requests[1]['input'][0]['result'])['result']
         self.assertEqual(data['csv'],'value\n1\n2\n')
         self.assertEqual(data['sent_row_count'],2)
         self.assertEqual(len(self.requests[2]['input']),1)
@@ -472,6 +472,61 @@ class InteractionTests(unittest.TestCase):
                  patch('src.interactions._wait_for_retry') as wait:
                 GeminiAgent(self.settings,client=client).run([user('質問')],ctx)
                 wait.assert_called_once_with(ctx,expected)
+
+    def test_resolved_question_empty_list_survives_real_sdk_as_json_text(self):
+        self.ctx.context_state={'questions':{'period':{
+            'question':'対象期間はいつか？','status':'resolved','conclusion':'2026年10月。'}}}
+        payload={'datasets':[], 'empty_object':{}, 'nested':[[],{}],
+                 'null_value':None,'zero':0,'false_value':False,'empty_string':''}
+        self.ctx.tools.list_datasets.return_value=payload
+        with self.sdk([interaction('state-1',[call('list_datasets')]),
+                       interaction('state-2',[output('確認済み')])]) as client:
+            result=GeminiAgent(self.settings,client=client).run(self.contents,self.ctx)
+        self.assertEqual(result.text,'確認済み')
+        step=self.requests[1]['input'][0]
+        self.assertEqual(step['call_id'],'list_datasets')
+        self.assertIsInstance(step['result'],str)
+        data=json.loads(step['result'])
+        self.assertEqual(data['current_question_state']['open_questions'],[])
+        for key,value in payload.items():
+            self.assertIn(key,data)
+            self.assertEqual(data[key],value)
+        archived=self.contents[2].parts[0].function_response.response
+        self.assertEqual(archived['datasets'],[])
+        self.assertEqual(archived['empty_object'],{})
+        self.assertNotIn('current_question_state',archived)
+
+    def test_parallel_tool_results_are_encoded_individually_without_losing_ids(self):
+        self.ctx.tools.list_datasets.return_value={'datasets':[]}
+        self.ctx.tools.list_tables.return_value={'tables':[]}
+        replies=[interaction('state-1',[call('list_datasets',call_id='datasets'),
+                                      call('list_tables',{'dataset':'data'},'tables')]),
+                 interaction('state-2',[output('空です')])]
+        with self.sdk(replies) as client:
+            GeminiAgent(self.settings,client=client).run(self.contents,self.ctx)
+        parts=self.requests[1]['input']
+        self.assertEqual([v['call_id'] for v in parts],['datasets','tables'])
+        self.assertEqual(json.loads(parts[0]['result'])['datasets'],[])
+        self.assertEqual(json.loads(parts[1]['result'])['tables'],[])
+
+    def test_failed_tool_submission_can_resume_without_rerunning_tool_or_losing_closed_state(self):
+        self.ctx.context_state={'questions':{'period':{
+            'question':'対象期間はいつか？','status':'resolved','conclusion':'今月。'}}}
+        rejected=httpx.Response(400,json={'error':{'code':'invalid_request',
+            'message':'Invalid function_response.response: field `current_question_state.open_questions` has an empty value.'}})
+        with self.sdk([interaction('state-1',[call('list_datasets')]),rejected,
+                       interaction('state-2',[output('続けました')])]) as client:
+            agent=GeminiAgent(self.settings,client=client)
+            with self.assertRaises(Exception) as caught:
+                agent.run(self.contents,self.ctx)
+            self.assertEqual(error_code(caught.exception),400)
+            self.assertEqual(self.ctx.interaction_state['id'],'state-1')
+            self.contents.append(user('続けて'))
+            self.assertEqual(agent.run(self.contents,self.ctx).text,'続けました')
+        self.ctx.tools.list_datasets.assert_called_once()
+        self.assertEqual(self.requests[2]['previous_interaction_id'],'state-1')
+        self.assertEqual([step['type'] for step in self.requests[2]['input']],['function_result','user_input'])
+        self.assertEqual(json.loads(self.requests[2]['input'][0]['result'])['current_question_state']['open_questions'],[])
 
 
 class InteractionConfigTests(unittest.TestCase):

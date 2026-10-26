@@ -93,6 +93,12 @@ def _input(contents):
     return steps
 
 
+def _wire_input(steps):
+    """ツール結果はJSON文字列で送る。空のlist/objectがAPI変換で型を失うのを避ける。"""
+    return [{**step, 'result': memory.encoded(step['result'])}
+            if step['type'] == 'function_result' else step for step in steps]
+
+
 def _bootstrap(contents, ctx):
     """期限切れ・旧会話は原本を再送せず、既知の要点と保存結果目録から復元。"""
     memory.sync_turns(contents, ctx)
@@ -268,14 +274,15 @@ def generate(client, contents, ctx, config, *, on_progress=None):
     if memory.state_for(ctx)['questions']:
         snapshot = memory.active_questions(memory.state_for(ctx))
         # 状態の最新スナップショットを既存のツール結果内に入れる。
-        if steps[-1]['type'] == 'function_result':
-            data = dict(steps[-1]['result'])
+        latest_result = next((step for step in reversed(steps) if step['type'] == 'function_result'), None)
+        if latest_result is not None:
+            data = dict(latest_result['result'])
             data['current_question_state'] = snapshot
-            steps[-1]['result'] = data
+            latest_result['result'] = data
     tools = tools_from_config(config)
     thinking = getattr(config.thinking_config, 'thinking_level', None)
     thinking = getattr(thinking, 'value', thinking)
-    body = {'model': ctx.settings.gemini_model, 'input': steps, 'store': True,
+    body = {'model': ctx.settings.gemini_model, 'input': _wire_input(steps), 'store': True,
             'tools': tools, 'system_instruction': config.system_instruction,
             'generation_config': {'thinking_level': str(thinking or 'low').lower()}}
     if previous:
