@@ -35,7 +35,7 @@ from .config import Settings, human_bytes, gemini_cost_usd
 from .prompts import SYSTEM_INSTRUCTION, build_system_instruction
 from .sql_guard import SQLGuardError, check_sql
 from .thinking import DEFAULT_EFFORT
-from . import interactions, analysis_safety
+from . import interactions, analysis_safety, numeric_grounding, request_audit
 from .usage_log import UsageLogger
 from .execution import ExecutionControl, ExecutionStopped
 from . import context_memory, tool_catalog
@@ -340,7 +340,7 @@ def build_declarations() -> list[types.FunctionDeclaration]:
             type=types.Type.OBJECT, description="これまでに読んだ結果の要点。要約用の別API呼び出しは不要。",
             properties={
                 "summary": types.Schema(type=types.Type.STRING, description="確定した事実・条件の箇条書き。未確認事項は混ぜない。1200文字以内"),
-                "references": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING), description="読み終えたresult_id。最大12件"),
+                "references": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING), description="読み終えたresult_ref（R1等）。長いIDを生成・推測しない。最大12件"),
                 "open_questions": types.Schema(type=types.Type.ARRAY, max_items=12,
                     description="未確認事項をID付きで追加・更新。未変更なら空配列。解決済みIDの再利用は禁止。",
                     items=types.Schema(type=types.Type.OBJECT, properties={
@@ -354,6 +354,7 @@ def build_declarations() -> list[types.FunctionDeclaration]:
                         "conclusion": types.Schema(type=types.Type.STRING, description="確認した結論と根拠。600文字以内"),
                     }, required=["id", "conclusion"])),
             }, required=["summary", "references", "open_questions", "resolved_questions"])
+    by_name["finish_answer"].parameters.properties["numeric_claims"] = numeric_grounding.claims_schema()
     return declarations
 
 
@@ -369,7 +370,8 @@ class GeminiAgent:
             location=settings.vertex_location,
             **({'http_options': types.HttpOptions(api_version='v1beta1',
                                                   timeout=getattr(settings, 'gemini_request_timeout_seconds', 120) * 1000,
-                                                  retry_options=types.HttpRetryOptions(attempts=1))}
+                                                  retry_options=types.HttpRetryOptions(attempts=1),
+                                                  client_args={'event_hooks': {'request': [request_audit.capture_http_request]}})}
                if interactions.enabled(settings) else {}),
         )
         self.declarations = build_declarations()
@@ -395,6 +397,16 @@ class GeminiAgent:
             kwargs["thinking_config"] = types.ThinkingConfig(
                 thinking_budget=self.settings.thinking_budget
             )
+        if ctx is not None:
+            kwargs['tools'] = [tool.model_copy(deep=True) for tool in kwargs['tools']]
+            refs = numeric_grounding.data_refs(ctx)
+            if refs:
+                for tool in kwargs['tools']:
+                    for declaration in tool.function_declarations or []:
+                        if declaration.name == 'finish_answer':
+                            declaration.parameters.required = list(dict.fromkeys([*declaration.parameters.required, 'numeric_claims']))
+                            declaration.parameters.properties['context_note'].properties['references'].items.enum = list(refs)[-12:]
+                            declaration.parameters.properties['numeric_claims'].items.properties['sources'].items.properties['result_ref'].enum = list(refs)[-12:]
         return types.GenerateContentConfig(**kwargs)
 
     def _generate(self, contents: list[types.Content], *, tool_names: list[str] | None = None, ctx: ToolContext | None = None):
@@ -495,12 +507,28 @@ class GeminiAgent:
                 raise BQToolError("answerには空でない最終回答を指定してください。")
             if not isinstance(overview, str) or not overview.strip() or len(overview) > context_memory.OVERVIEW_CHARS:
                 raise BQToolError("conversation_summaryには4000文字以内で会話全体の要点を指定してください。")
+            note = numeric_grounding.normalize_note(ctx, note)
+            try:
+                answer, bindings = numeric_grounding.render(ctx, answer, args.get('numeric_claims'),
+                    require_grounding=analysis_safety.needs_evidence(ctx))
+            except (ValueError, ArithmeticError) as exc:
+                context_memory.state_for(ctx)['numeric_grounding'] = {'turn_id': ctx.turn_id, 'status': 'rejected', 'error': str(exc)}
+                raise BQToolError(str(exc)) from exc
+            if bindings:
+                derived = list(dict.fromkeys(source['result_id'] for binding in bindings for source in binding['sources']))
+                note = {**note, 'references': list(dict.fromkeys([*note.get('references', []), *derived]))} if isinstance(note, dict) else note
             warning = context_memory.validate_note(ctx, note)
             if warning or note is None:
+                context_memory.state_for(ctx)['numeric_grounding']['status'] = 'rejected'
                 raise BQToolError(warning or "context_noteを指定してください。")
             evidence_error = analysis_safety.validate_answer(ctx, note)
             if evidence_error:
+                context_memory.state_for(ctx)['numeric_grounding']['status'] = 'rejected'
                 raise BQToolError(evidence_error)
+            if analysis_safety.needs_evidence(ctx):
+                note, overview = numeric_grounding.verified_note(ctx, answer, note, bindings)
+            args['context_note'] = note
+            context_memory.state_for(ctx)['numeric_grounding']['status'] = 'verified'
             return {"status": "final_answer", "answer": answer.strip(),
                     "summary": context_memory.factual_summary(note), "overview": overview.strip()}
 
@@ -723,6 +751,10 @@ class GeminiAgent:
         if receipt_key and receipt_key in ctx.tool_receipts:
             return types.Part.model_validate(ctx.tool_receipts[receipt_key])
 
+        if isinstance(args.get('context_note'), dict):
+            args['context_note'] = numeric_grounding.normalize_note(ctx, args['context_note'])
+        if isinstance(args.get('result_id'), str):
+            args['result_id'] = numeric_grounding.resolve_ref(ctx, args['result_id'])
         started = time.monotonic()
         started_at = datetime.now().astimezone().isoformat()
         try:
@@ -799,6 +831,7 @@ class GeminiAgent:
                 payload = {**payload, "context_note_warning": warning}
             if name != "finish_answer":
                 payload = context_memory.register_result(ctx, name, args, payload)
+                payload = numeric_grounding.attach_ref(ctx, payload)
         analysis_safety.record(ctx, name, args, payload)
         part = types.Part.from_function_response(name=name, response=payload)
         part.function_response.id = getattr(call, "id", None)
@@ -1040,6 +1073,24 @@ class GeminiAgent:
             if final_payload is not None:
                 result = self._answer(contents, final_payload["answer"], ctx=ctx)
                 context_memory.finish_turn(contents, ctx, final_payload["summary"], final_payload["overview"])
+                return result
+            scalar = numeric_grounding.scalar_answer(ctx, [(part.function_response.name, part.function_response.response) for part in responses])
+            if scalar is not None and clarification is None:
+                answer, bindings = scalar
+                summary = '取得済みの単一セルから数値回答を確定。' + '; '.join(
+                    f"{source['column']}={binding['rendered']} ({source['result_id']})" for binding in bindings for source in binding['sources'])
+                refs = list(dict.fromkeys(source['result_id'] for binding in bindings for source in binding['sources']))
+                root = context_memory.state_for(ctx)
+                turn_key = root['turns'][-1]['id'] if root['turns'] else ctx.turn_id
+                note = {'summary': summary, 'references': refs, 'open_questions': [],
+                        'resolved_questions': [{'id': key, 'conclusion': '検証済みの保存結果を参照して回答した。'}
+                            for key, item in root['questions'].items() if item['status'] == 'open' and item.get('turn_id') == turn_key]}
+                note, overview = numeric_grounding.verified_note(ctx, answer, note, bindings)
+                context_memory.accept_note(ctx, note)
+                analysis_safety.record(ctx, 'scalar_answer', {}, {'status': 'verified'})
+                result = self._answer(contents, answer, ctx=ctx)
+                context_memory.finish_turn(contents, ctx, note['summary'], overview)
+                analysis_safety.state(ctx)['next_action'] = '数値回答を取得済みセルから確定済み。'
                 return result
             if clarification is not None:
                 # ツール呼出への応答を完結させ、次のユーザー回答を通常の会話として受ける。

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import random
@@ -16,9 +17,11 @@ from .token_budget import estimate_tokens
 from .bq_tools import error_code
 from .execution import ExecutionStopped
 from .interaction_stream import consume
+from . import request_audit, tool_wire
 
 logger = logging.getLogger(__name__)
 RETENTION_SECONDS = 7 * 86400
+TOOL_WIRE_FORMAT = "object-values-v1"
 RATE_LIMIT_RETRIES = 3
 MAX_RETRY_WAIT_SECONDS = 30
 
@@ -95,8 +98,8 @@ def _input(contents):
 
 
 def _wire_input(steps):
-    """ツール結果はJSON文字列で送る。空のlist/objectがAPI変換で型を失うのを避ける。"""
-    return [{**step, 'result': memory.encoded(step['result'])}
+    """数値・IDをオブジェクトとして渡す。空配列等でVertexの型が消える問題を回避。"""
+    return [{**step, 'result': tool_wire.encode(json.loads(memory.encoded(step['result'])))}
             if step['type'] == 'function_result' else step for step in steps]
 
 
@@ -188,9 +191,15 @@ def _create(api, body, ctx, on_progress, metrics=None):
         if ctx.execution_control is not None:
             ctx.execution_control.check()
         try:
-            result = consume(api.create(**body), ctx, on_progress, metrics, started)
+            metrics['sent_tool_results'] = request_audit.results(body['input'])
+            metrics['request_input_sha256'] = request_audit.digest(body['input'])
+            audit_token = request_audit.active_request.set(metrics)
+            try:
+                result = consume(api.create(**body), ctx, on_progress, metrics, started)
+            finally:
+                request_audit.active_request.reset(audit_token)
         except Exception as exc:
-            if _code(exc) != 429 or attempt == RATE_LIMIT_RETRIES or metrics.get("stream_events", 0):
+            if _code(exc) != 429 or attempt == RATE_LIMIT_RETRIES or metrics.get('stream_events', 0):
                 raise
             delay = _retry_delay(exc, attempt)
             if delay is None:
@@ -267,10 +276,11 @@ def generate(client, contents, ctx, config, *, on_progress=None, metrics=None):
     delta = _input(contents[cursor:]) if consistent else []
     projected = state.get('input_tokens', 0) + state.get('output_tokens', 0) + estimate_tokens(delta)
     near_limit = projected >= int(limit * .8)
-    restart = not state.get('id') or not consistent or expired or near_limit or state.get('reset_required')
+    wire_changed = bool(state.get('id')) and state.get('tool_wire_format') != TOOL_WIRE_FORMAT
+    restart = not state.get('id') or not consistent or expired or near_limit or state.get('reset_required') or wire_changed
     if restart:
         reason = ('initial_or_legacy' if not state.get('id') else 'history_changed' if not consistent
-                  else 'expired' if expired else 'input_budget' if near_limit else 'interrupted')
+                  else 'expired' if expired else 'input_budget' if near_limit else 'wire_format_changed' if wire_changed else 'interrupted')
         steps = (_input(contents) if len(contents) == 1 and memory.is_question(contents[0])
                  else _bootstrap(contents, ctx))
         previous = None
@@ -329,7 +339,7 @@ def generate(client, contents, ctx, config, *, on_progress=None, metrics=None):
     fallback_input = (state.get('input_tokens', 0) + state.get('output_tokens', 0)
                       + max(0, config_estimate - state.get('config_tokens_estimate', 0)) if previous else config_estimate)
     fallback_input += estimate_tokens(body['input'])
-    ctx.interaction_state = {'version': 1, 'id': interaction_id, 'identity': identity,
+    ctx.interaction_state = {'version': 1, 'tool_wire_format': TOOL_WIRE_FORMAT, 'id': interaction_id, 'identity': identity,
                              'cursor': len(expected), 'prefix_digest': _digest(expected),
                              'chain_started_at': state.get('chain_started_at', now) if previous else now,
                              'input_tokens': measured_input if measured_input is not None else fallback_input,

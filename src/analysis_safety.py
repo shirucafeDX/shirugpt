@@ -9,7 +9,7 @@ from sqlglot import exp
 from sqlglot.errors import OptimizeError
 from sqlglot.optimizer.qualify import qualify
 
-from . import context_memory as memory
+from . import context_memory as memory, numeric_grounding
 from .sql_guard import SQLGuardError
 
 BLOCKED_ANSWER = "回答の根拠となる実行結果を確認できなかったため、数値を含む分析回答の表示を見送りました。データ・実行詳細で取得結果とエラーを確認できます。"
@@ -151,6 +151,7 @@ def snapshot(ctx):
         execution_note += "このターンでは有効なデータ結果をまだ取得・参照していません。数値は未確認です。"
     return {'turn_id': ctx.turn_id, 'execution_note': execution_note, 'steps': list(current['steps']),
             'next_action': current['next_action'],
+            'numeric_grounding': root.get('numeric_grounding', {}) if root.get('numeric_grounding', {}).get('turn_id') == ctx.turn_id else {},
             'summary': turn.get('summary', ''), 'conversation_summary': turn.get('overview', ''),
             'context_note': dict(note) if note.get('turn_id') in (ctx.turn_id, turn.get('id')) else {},
             'verified_schemas': {key: [dict(c) for c in value.get('columns', [])] for key, value in ctx.schema_cache.items() if key in current['schema_keys']}}
@@ -168,4 +169,5 @@ def request_context(ctx, tools):
     if needs_evidence(ctx):
         refs = [ref for ref in memory.state_for(ctx)['results'] if has_data_reference(ctx, [ref])][-6:]
         value['available_data_result_ids'] = refs
+        value['available_result_refs'] = {alias: rid for alias, rid in numeric_grounding.data_refs(ctx).items() if rid in refs}
     return '\nアプリが確認した実行状態（過去の要約より優先。失敗は成功扱いしない）: ' + memory.encoded(value)

@@ -111,7 +111,7 @@ class AnalysisSafetyTests(unittest.TestCase):
     def test_metadata_and_failed_results_cannot_support_data_answer(self):
         safety.state(self.ctx)['data_requested'] = True
         meta = self.dispatch('list_tables', {'dataset': '202506'})['result_id']
-        args = {'answer': '来店数は248件です', 'conversation_summary': '248件だった',
+        args = {'answer': '取得値を確認しました', 'conversation_summary': '248件だった',
                 'context_note': {'summary': '248件だった', 'references': [meta]}}
         self.assertIn('result_id', self.dispatch('finish_answer', args)['error'])
         memory.state_for(self.ctx)['results']['failed'] = {'payload': {'error': 'SQL failed'}}
@@ -122,7 +122,7 @@ class AnalysisSafetyTests(unittest.TestCase):
     def test_successful_query_and_valid_finish_answer_keep_summaries_and_references(self):
         rid = memory.result_id_for('run_query', {'sql': self.good_sql})
         self.agent._generate = Mock(side_effect=[reply('run_query', {'sql': self.good_sql}),
-            reply('finish_answer', {'answer': '京大前店は12件です。', 'conversation_summary': '京大前店の来店数は12件。',
+            reply('finish_answer', {'answer': '京大前店は{{n}}件です。', 'numeric_claims': [{'key': 'n', 'operation': 'cell', 'sources': [{'result_ref': rid, 'column': 'n', 'row_index': 0}]}], 'conversation_summary': '京大前店の来店数は12件。',
                 'context_note': {'summary': '確認した来店数は12件。', 'references': [rid]}})])
         contents = [user('京大店の来店数推移')]
         result = self.agent.run(contents, self.ctx)

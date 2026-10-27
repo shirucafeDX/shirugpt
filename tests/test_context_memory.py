@@ -81,7 +81,9 @@ class MemoryTests(unittest.TestCase):
 
     def test_finish_returns_answer_and_memos_in_existing_generation(self):
         self.agent._generate = Mock(side_effect=[reply('run_query', {'sql': self.sql}), reply('finish_answer', {
-            'answer': '店舗599は599円です。', 'context_note': self.note(),
+            'answer': '{{shop}}は{{amount}}円です。', 'context_note': self.note(),
+            'numeric_claims': [{'key': 'shop', 'operation': 'cell', 'sources': [{'result_ref': self.rid, 'column': '店舗', 'row_index': 599}]},
+                               {'key': 'amount', 'operation': 'cell', 'sources': [{'result_ref': self.rid, 'column': '売上', 'row_index': 599}]}],
             'conversation_summary': '目的は店舗別売上。今月・円単位。結果ID: ' + self.rid,
         })])
         result = self.agent.run(self.contents, self.ctx)
@@ -89,7 +91,7 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(self.agent._generate.call_count, 2)
         self.ctx.tools.run_query.assert_called_once()
         turn = self.ctx.context_state['turns'][0]
-        self.assertEqual(turn['summary'], self.note()['summary'])
+        self.assertIn('599円', turn['summary'])
         self.assertIn(self.rid, turn['overview'])
         self.assertEqual(turn['result_ids'], [self.rid])
         # 後続質問に過去のSQLと明細を再送しない。
@@ -228,7 +230,9 @@ class MemoryTests(unittest.TestCase):
         recall_id = memory.result_id_for('recall_context', args)
         self.agent._generate = Mock(side_effect=[
             reply('run_query', {'sql': self.sql}), reply('recall_context', args),
-            reply('finish_answer', {'answer': '店舗550の売上は550円です。',
+            reply('finish_answer', {'answer': '{{shop}}の売上は{{amount}}円です。',
+                                   'numeric_claims': [{'key': 'shop', 'operation': 'cell', 'sources': [{'result_ref': self.rid, 'column': '店舗', 'row_index': 550}]},
+                                                      {'key': 'amount', 'operation': 'cell', 'sources': [{'result_ref': self.rid, 'column': '売上', 'row_index': 550}]}],
                                    'context_note': self.note([self.rid, recall_id]),
                                    'conversation_summary': '今月の店舗別売上。店舗550は550円。'})])
         self.assertIn('550円', self.agent.run(self.contents, self.ctx).text)

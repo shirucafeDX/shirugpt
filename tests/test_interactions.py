@@ -14,12 +14,16 @@ from google.genai.errors import ClientError
 from google.oauth2.credentials import Credentials
 from google.cloud import bigquery
 
-from src import interactions, context_memory as memory
+from src import interactions, context_memory as memory, tool_wire
 from src.agent import GeminiAgent, ToolContext, ConfirmationPending
 from src.bq_tools import ConfirmationRequired, QueryRun, error_code, friendly_error
 from src.chat_history import pack, unpack
 from src.usage_log import UsageLogger, _SCHEMA
 from src.execution import ExecutionControl, ExecutionStopped
+
+
+def tool_result(value):
+    return tool_wire.decode(json.loads(value) if isinstance(value, str) else value)
 
 
 def settings(**overrides):
@@ -91,10 +95,10 @@ class InteractionTests(unittest.TestCase):
         self.assertEqual(second['previous_interaction_id'],'state-1')
         self.assertEqual([t['name'] for t in second['tools']],['select_tools','list_datasets'])
         self.assertEqual(second['input'][0]['call_id'],'select_tools')
-        self.assertEqual(json.loads(second['input'][0]['result'])['available_tools'],['list_datasets'])
+        self.assertEqual(tool_result(second['input'][0]['result'])['available_tools'],['list_datasets'])
         self.assertEqual(third['previous_interaction_id'],'state-2')
         self.assertEqual(len(third['input']),1)
-        self.assertIn('datasets',json.loads(third['input'][0]['result']))
+        self.assertIn('datasets',tool_result(third['input'][0]['result']))
         self.assertEqual(fourth['previous_interaction_id'],'state-3')
         self.assertEqual(fourth['input'],[{'type':'user_input','content':[{'type':'text','text':'続けて'}]}])
         self.assertTrue(all(r['store'] for r in self.requests))
@@ -228,7 +232,7 @@ class InteractionTests(unittest.TestCase):
         sent=client.interactions.create.call_args.kwargs
         self.assertEqual(sent['previous_interaction_id'],'state-1')
         self.assertEqual([v['type'] for v in sent['input']],['function_result','user_input'])
-        self.assertEqual(json.loads(sent['input'][0]['result'])['answer'],'最終回答です')
+        self.assertEqual(tool_result(sent['input'][0]['result'])['answer'],'最終回答です')
 
     def test_restore_pending_batch_keeps_receipts_and_original_call_ids(self):
         client=Mock()
@@ -249,6 +253,19 @@ class InteractionTests(unittest.TestCase):
         tools.run_query.assert_called_once()
         self.assertEqual(client.interactions.create.call_args.kwargs['previous_interaction_id'],'state-1')
         self.assertEqual([v['call_id'] for v in client.interactions.create.call_args.kwargs['input']],['first','expensive'])
+
+    def test_old_string_tool_result_state_is_rebuilt_once(self):
+        client = Mock()
+        client.interactions.create.side_effect = [interaction('old', [output('回答')]), interaction('new', [output('次の回答')])]
+        agent = GeminiAgent(self.settings, client=client)
+        agent.run(self.contents, self.ctx)
+        self.ctx.interaction_state.pop('tool_wire_format')
+        self.ctx.start_turn()
+        self.contents.append(user('追加質問'))
+        agent.run(self.contents, self.ctx)
+        self.assertNotIn('previous_interaction_id', client.interactions.create.call_args.kwargs)
+        self.assertEqual(self.ctx.interaction_state['last_reset_reason'], 'wire_format_changed')
+        self.assertEqual(self.ctx.interaction_state['tool_wire_format'], interactions.TOOL_WIRE_FORMAT)
 
     def test_changed_history_or_project_starts_new_state(self):
         client=Mock()
@@ -368,13 +385,13 @@ class InteractionTests(unittest.TestCase):
         self.ctx.tools.run_query.return_value=QueryRun('SELECT 1','SELECT 1',1,1,frame,{'row_count':2})
         self.ctx.active_tool_names=['run_query']
         replies=[interaction('state-1',[call('run_query',{'sql':'SELECT 1'})]),
-                 interaction('state-2',[final_call('合計は3')]),interaction('state-3',[output('説明')])]
+                 interaction('state-2',[call('finish_answer', {'answer': '合計は{{total}}', 'conversation_summary': '合計は3', 'context_note': {'summary': '合計は3', 'references': [memory.result_id_for('run_query', {'sql': 'SELECT 1'})]}, 'numeric_claims': [{'key': 'total', 'operation': 'cell', 'sources': [{'result_ref': memory.result_id_for('run_query', {'sql': 'SELECT 1'}), 'column': 'value', 'aggregate': 'sum'}]}]})]),interaction('state-3',[output('説明')])]
         with self.sdk(replies) as client:
             agent=GeminiAgent(self.settings,client=client)
             agent.run(self.contents,self.ctx)
             self.contents.append(user('説明して'))
             agent.run(self.contents,self.ctx)
-        data=json.loads(self.requests[1]['input'][0]['result'])['result']
+        data=tool_result(self.requests[1]['input'][0]['result'])['result']
         self.assertEqual(data['csv'],'value\n1\n2\n')
         self.assertEqual(data['sent_row_count'],2)
         self.assertEqual(len(self.requests[2]['input']),2)
@@ -500,7 +517,7 @@ class InteractionTests(unittest.TestCase):
                 GeminiAgent(self.settings,client=client).run([user('質問')],ctx)
                 wait.assert_called_once_with(ctx,expected)
 
-    def test_resolved_question_empty_list_survives_real_sdk_as_json_text(self):
+    def test_resolved_question_empty_list_survives_real_sdk_with_explicit_marker(self):
         self.ctx.context_state={'questions':{'period':{
             'question':'対象期間はいつか？','status':'resolved','conclusion':'2026年10月。'}}}
         payload={'datasets':[], 'empty_object':{}, 'nested':[[],{}],
@@ -512,8 +529,8 @@ class InteractionTests(unittest.TestCase):
         self.assertEqual(result.text,'確認済み')
         step=self.requests[1]['input'][0]
         self.assertEqual(step['call_id'],'list_datasets')
-        self.assertIsInstance(step['result'],str)
-        data=json.loads(step['result'])
+        self.assertIsInstance(step['result'],dict)
+        data=tool_result(step['result'])
         self.assertEqual(data['current_question_state']['open_questions'],[])
         for key,value in payload.items():
             self.assertIn(key,data)
@@ -533,8 +550,8 @@ class InteractionTests(unittest.TestCase):
             GeminiAgent(self.settings,client=client).run(self.contents,self.ctx)
         parts=self.requests[1]['input']
         self.assertEqual([v['call_id'] for v in parts],['datasets','tables'])
-        self.assertEqual(json.loads(parts[0]['result'])['datasets'],[])
-        self.assertEqual(json.loads(parts[1]['result'])['tables'],[])
+        self.assertEqual(tool_result(parts[0]['result'])['datasets'],[])
+        self.assertEqual(tool_result(parts[1]['result'])['tables'],[])
 
     def test_failed_tool_submission_can_resume_without_rerunning_tool_or_losing_closed_state(self):
         self.ctx.context_state={'questions':{'period':{
@@ -553,7 +570,7 @@ class InteractionTests(unittest.TestCase):
         self.ctx.tools.list_datasets.assert_called_once()
         self.assertEqual(self.requests[2]['previous_interaction_id'],'state-1')
         self.assertEqual([step['type'] for step in self.requests[2]['input']],['function_result','user_input'])
-        self.assertEqual(json.loads(self.requests[2]['input'][0]['result'])['current_question_state']['open_questions'],[])
+        self.assertEqual(tool_result(self.requests[2]['input'][0]['result'])['current_question_state']['open_questions'],[])
 
 
 class InteractionConfigTests(unittest.TestCase):

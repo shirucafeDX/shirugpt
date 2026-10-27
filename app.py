@@ -562,11 +562,22 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
                              "最初のイベントまで（秒）": event.get("first_event_seconds"),
                              "本文・引数の受信開始まで（秒）": event.get("first_content_seconds"),
                              "受信イベント数": event.get("stream_events"), "受信文字数": event.get("received_chars"),
-                             "最終受信イベント": event.get("last_event_type"),
+                             "最終受信イベント": event.get("last_event_type"), "ツール送信照合": event.get("wire_results_verified"),
                              "入力トークン": event.get("input_tokens"), "出力トークン": event.get("output_tokens"),
                              "思考トークン": event.get("thinking_tokens"), "キャッシュ入力": event.get("cached_input_tokens")})
             st.dataframe(pd.DataFrame(rows), hide_index=True)
             st.caption("AI呼び出し時間は通信・再試行待機を含みます。再試行待機の行はAI呼び出し時間の内数です。空欄は未取得です。モデル内部の思考時間は取得できません。")
+        if any(event.get("sent_tool_results") for event in events):
+            with st.expander("ツール結果の送信記録"):
+                receipts = []
+                for call_index, event in enumerate([e for e in events if e.get("event") == "llm_call"], 1):
+                    for item in event.get("wire_tool_results", event.get("sent_tool_results", [])):
+                        receipts.append({"AI呼び出し": call_index, "ツール": item.get("tool"),
+                                         "結果参照": item.get("result_ref") or item.get("result_id"),
+                                         "送信形式": item.get("wire_type"), "送信照合": event.get("wire_results_verified"),
+                                         "結果のSHA-256": item.get("payload_sha256"), "CSVのSHA-256": item.get("csv_sha256")})
+                st.dataframe(pd.DataFrame(receipts), hide_index=True)
+                st.caption("元のツール結果と送信JSONを照合します。本文や認証ヘッダーはこの記録に保存しません。")
         summary = message.get("execution_summary") or {}
         if summary:
             with st.expander("引き継ぎ要約"):
@@ -587,6 +598,17 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
                         st.text(step["error"])
                 if summary.get("next_action"):
                     st.write("次の行動", summary["next_action"])
+        grounding = summary.get("numeric_grounding") or {}
+        if grounding:
+            with st.expander("数値の根拠"):
+                st.caption(f"検証状態: {grounding.get('status', '')} · 方法: {grounding.get('mode', '')}")
+                if grounding.get("error"):
+                    st.text(grounding["error"])
+                for binding in grounding.get("bindings", []):
+                    st.write(f"{binding['key']}: {binding['rendered']}")
+                    st.caption(f"計算: {binding.get('formula', binding['operation'])} · 百分率: {binding.get('as_percent', False)} · 小数桁: {binding.get('decimals')}")
+                    st.dataframe(pd.DataFrame(binding["sources"]), hide_index=True)
+                st.caption("行番号は保存済み原表の0始まりです。数値と参照・計算結果を照合しており、文章の意味やSQLの業務定義を完全に証明するものではありません。")
         for error in message.get("errors") or []:
             st.text(error)
         for idx, run in enumerate(runs):
