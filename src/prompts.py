@@ -27,7 +27,17 @@ ADVICE_INSTRUCTION = """## 施策検討・壁打ちの説明
   根拠なく同意したり因果関係を断定したりせず、当該店舗の事実として一般知識を述べない。
 - 外部の最新情報や調査を確認したように述べず、必要な確認先を示す。"""
 
-SYSTEM_INSTRUCTION = COMMON_INSTRUCTION + CATALOG_INSTRUCTION
+TABLE_OVERVIEW_INSTRUCTION = """## 主な業務テーブルの概要
+- 来店：店舗・来店日時・利用者属性を含む来店記録。
+- Meetup参加：Meetupの参加・参加予定・事前キャンセル・無断欠席の記録。
+- イベント：イベントの開催情報（開始・終了日時など）。
+- 日次データ：日付を軸に業務指標を確認するためのデータ。
+- 月次データ：月を軸に業務指標を確認するためのデータ。
+これは分析対象を選ぶための概要で、利用できる全テーブルの一覧ではない。
+対象データセットでの実在はlist_tables、列・1行の単位・結合キーはget_table_schemaで確認する。
+概要だけで列や指標の有無、行の一意性を決めつけない。"""
+
+SYSTEM_INSTRUCTION = COMMON_INSTRUCTION + "\n" + TABLE_OVERVIEW_INSTRUCTION + "\n" + CATALOG_INSTRUCTION
 
 DATASETS_INSTRUCTION = """## データセット一覧の確認
 - どのデータを見るか不明なときにlist_datasetsを使う。許可されている一覧の正確なIDを次のツールに渡す。"""
