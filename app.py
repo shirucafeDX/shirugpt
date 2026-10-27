@@ -559,6 +559,10 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
             for event in events:
                 rows.append({"処理": event.get("tool") or event.get("event"),
                              "開始日時": event.get("started_at"), "秒": event.get("seconds"), "状態": event.get("status", ""), "エラー": event.get("error", False),
+                             "最初のイベントまで（秒）": event.get("first_event_seconds"),
+                             "本文・引数の受信開始まで（秒）": event.get("first_content_seconds"),
+                             "受信イベント数": event.get("stream_events"), "受信文字数": event.get("received_chars"),
+                             "最終受信イベント": event.get("last_event_type"),
                              "入力トークン": event.get("input_tokens"), "出力トークン": event.get("output_tokens"),
                              "思考トークン": event.get("thinking_tokens"), "キャッシュ入力": event.get("cached_input_tokens")})
             st.dataframe(pd.DataFrame(rows), hide_index=True)

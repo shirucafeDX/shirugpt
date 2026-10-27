@@ -855,6 +855,7 @@ class GeminiAgent:
         encoded = json.dumps(diagnostics, ensure_ascii=False)
         logger.warning("%s: %s", source, encoded)
         ctx.turn_errors.append(encoded)
+        analysis_safety.record(ctx, 'response_validation', {}, {'error': encoded})
         if ctx.usage_logger is not None:
             # トークンは診断用 JSON 内のみ。課金用の列には二重計上しない。
             ctx.usage_logger.log_error(
@@ -895,12 +896,21 @@ class GeminiAgent:
                 try:
                     if interactions.enabled(self.settings):
                         response = interactions.generate(self.client, contents, ctx,
-                            self._config(list(ctx.active_tool_names), ctx), on_progress=on_progress)
+                            self._config(list(ctx.active_tool_names), ctx), on_progress=on_progress, metrics=request_event)
                     else:
                         response = self._generate(context_memory.build_request(contents, ctx), tool_names=list(ctx.active_tool_names), ctx=ctx)
                 except Exception as exc:  # noqa: BLE001 - 記録してから同じ例外を上に伝える
-                    if ctx.execution_control is not None:
-                        ctx.execution_control.check()
+                    if isinstance(exc, ExecutionStopped) or (ctx.execution_control is not None and ctx.execution_control.stopped.is_set()):
+                        request_event.update(status='stopped', error=False)
+                        raise ExecutionStopped() from None
+                    analysis_safety.record(ctx, 'llm_call', {}, {'error': technical_detail(exc)})
+                    # 完了イベントの使用量は、引数の検証に失敗した場合も一度だけ計上する。
+                    if request_event.get('reported_usage') is not None:
+                        usage_response = interactions._response({'status': 'failed', 'steps': [], 'usage': request_event['reported_usage']})
+                        self._record_usage(ctx, usage_response, getattr(self.settings, 'gemini_model', 'gemini-2.5-flash'))
+                        u = usage_response.usage_metadata
+                        request_event.update(input_tokens=u.prompt_token_count, output_tokens=u.candidates_token_count,
+                                             thinking_tokens=u.thoughts_token_count, cached_input_tokens=u.cached_content_token_count)
                     if ctx.usage_logger is not None:
                         ctx.usage_logger.log_error(
                             user_email=ctx.user_email,

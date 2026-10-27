@@ -130,6 +130,8 @@ def record(ctx, name, args, payload):
         if name == 'run_query':
             current['failures'][query_key(str(args.get('sql', '')))] = entry['error']
         current['next_action'] = 'エラーと確認済みスキーマを照合し、同じ失敗を繰り返さず条件・SQLを修正する。成功するまで数値は未確認。'
+        if name in ('llm_call', 'response_validation'):
+            current['next_action'] = '保存済み結果を再利用し、AI応答の取得を再開する。受信途中のSQL・回答は未実行。'
     elif name in ('run_query', 'analyze_result', 'recall_context'):
         current['next_action'] = '保存結果を確認し、実在する結果IDを根拠としてfinish_answerに渡す。'
     if name == 'finish_answer' and not payload.get('error'):

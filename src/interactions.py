@@ -15,6 +15,7 @@ from . import context_memory as memory
 from .token_budget import estimate_tokens
 from .bq_tools import error_code
 from .execution import ExecutionStopped
+from .interaction_stream import consume
 
 logger = logging.getLogger(__name__)
 RETENTION_SECONDS = 7 * 86400
@@ -179,15 +180,17 @@ def _wait_for_retry(ctx, seconds):
         control.check()
 
 
-def _create(api, body, ctx, on_progress):
+def _create(api, body, ctx, on_progress, metrics=None):
     """明示的に拒否された429だけを再試行。SQLや結果処理は繰り返さない。"""
+    metrics = metrics if metrics is not None else {}
+    started = time.monotonic()
     for attempt in range(RATE_LIMIT_RETRIES + 1):
         if ctx.execution_control is not None:
             ctx.execution_control.check()
         try:
-            result = api.create(**body)
+            result = consume(api.create(**body), ctx, on_progress, metrics, started)
         except Exception as exc:
-            if _code(exc) != 429 or attempt == RATE_LIMIT_RETRIES:
+            if _code(exc) != 429 or attempt == RATE_LIMIT_RETRIES or metrics.get("stream_events", 0):
                 raise
             delay = _retry_delay(exc, attempt)
             if delay is None:
@@ -245,7 +248,8 @@ def _response(interaction):
         finish_message=status if finish != 'STOP' else None)], usage_metadata=metadata)
 
 
-def generate(client, contents, ctx, config, *, on_progress=None):
+def generate(client, contents, ctx, config, *, on_progress=None, metrics=None):
+    metrics = metrics if metrics is not None else {}
     api = client.interactions
     if isinstance(client, genai.Client):
         # SDK 2.18.1はattempts=0を1へ正規化した後、Interactions側で
@@ -287,15 +291,17 @@ def generate(client, contents, ctx, config, *, on_progress=None):
     tools = tools_from_config(config)
     thinking = getattr(config.thinking_config, 'thinking_level', None)
     thinking = getattr(thinking, 'value', thinking)
-    body = {'model': ctx.settings.gemini_model, 'input': _wire_input(steps), 'store': True,
+    body = {'model': ctx.settings.gemini_model, 'input': _wire_input(steps), 'store': True, 'stream': True,
             'tools': tools, 'system_instruction': config.system_instruction,
             'generation_config': {'thinking_level': str(thinking or 'low').lower()}}
+    if config.temperature is not None:
+        body['generation_config']['temperature'] = config.temperature
     if previous:
         body['previous_interaction_id'] = previous
     try:
-        interaction = _create(api, body, ctx, on_progress)
+        interaction = _create(api, body, ctx, on_progress, metrics)
     except Exception as exc:
-        if previous and _code(exc) == 404:
+        if previous and _code(exc) == 404 and not metrics.get('stream_events'):
             # モデルやエンドポイントの404を期限切れと誤認しない。
             try:
                 api.get(id=previous)
@@ -305,8 +311,8 @@ def generate(client, contents, ctx, config, *, on_progress=None):
             else:
                 raise
             body.pop('previous_interaction_id')
-            body['input'] = _bootstrap(contents, ctx)
-            interaction = _create(api, body, ctx, on_progress)
+            body['input'] = _wire_input(_bootstrap(contents, ctx))
+            interaction = _create(api, body, ctx, on_progress, metrics)
             reason, previous = 'expired_on_server', None
         else:
             raise

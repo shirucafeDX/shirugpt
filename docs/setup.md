@@ -214,7 +214,7 @@ cp .env.example .env
 | `GEMINI_MODEL` | `gemini-3.8-flash` | 使用モデル |
 | `GEMINI_API` | `interactions` | 状態IDで継続するAPI。旧方式は `generate_content` |
 | `GEMINI_STATE_MAX_INPUT_TOKENS` | `32000` | 実入力＋直前出力＋次の差分の概算が80%に達したら要点から新状態へ引き継ぐ |
-| `GEMINI_REQUEST_TIMEOUT_SECONDS` | `120` | Interactions APIの1回の生成待機上限（秒）。429のみ待機して最大3回再試行 |
+| `GEMINI_REQUEST_TIMEOUT_SECONDS` | `120` | Interactions APIの接続・読み取りの待機上限（秒）。ストリーミング受信が続けば総時間は超える。受信開始前の429のみ最大3回再試行 |
 | `GEMINI_THINKING_BUDGET` | （空） | 旧2.5用。3.8では使わず、既定はLow、/effortでMedium・Highも選択可能 |
 | `DRY_RUN_CONFIRM_BYTES` | `1073741824`（1GB） | 推定スキャン量がこれを超えたら実行前に確認 |
 | `MAX_BYTES_BILLED` | `10737418240`（10GB） | BigQuery に渡す課金上限。超えるクエリは BigQuery 側で失敗 |
