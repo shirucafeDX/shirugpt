@@ -8,7 +8,7 @@ from google.api_core.exceptions import NotFound
 from google.cloud import geminidataanalytics as ca
 from google.genai import types
 
-from src.agent import ToolContext
+from src.agent import ToolContext, ClarificationResult
 from src.chat_history import pack, unpack
 from src.config import load_settings
 from src.conversational_analytics import ConversationalAnalyticsAgent, INSTRUCTION
@@ -52,6 +52,13 @@ class AnalyticsTests(unittest.TestCase):
         self.assertTrue(self.ctx.turn_events[0]['continued'])
         self.assertIsNone(self.ctx.turn_events[0]['input_tokens'])
         self.ctx.usage_logger.log_gemini_call.assert_not_called()
+
+    def test_structured_clarification_returns_existing_choice_form_contract(self):
+        answer = '{"type":"clarification","question":"対象店舗は？","options":["京都大学前店","東京大学前店"],"selection_mode":"single"}'
+        result = self.run_turn([message({'text': {'text_type': 'FINAL_RESPONSE', 'parts': [answer]}})])
+        self.assertIsInstance(result, ClarificationResult)
+        self.assertEqual(result.options, ['京都大学前店', '東京大学前店'])
+        self.assertEqual(result.selection_mode, 'single')
 
     def test_confirmed_table_only_and_python_enabled_in_created_agent(self):
         self.agents.get_data_agent.side_effect = NotFound('missing')

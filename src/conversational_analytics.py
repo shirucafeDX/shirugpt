@@ -14,19 +14,24 @@ from google.cloud import geminidataanalytics as ca
 from google.genai import types
 from google.protobuf.field_mask_pb2 import FieldMask
 
-from .agent import AnswerResult
+from .agent import AnswerResult, ClarificationResult
 from .bq_tools import BQToolError, QueryRun, technical_detail
 from . import analytics_costs
 
 
 INSTRUCTION = """language: Japanese
-purpose: 来店データを分析し、事実と仮説を分けて課題と検証施策を示す。
+purpose: 質問に応じて簡潔な回答や、データに基づく課題分析・施策検討を行う。
 rules:
+  - 最初に依頼の目的、対象、必要な情報と分析の順序を整理する。
+  - 数値や事実を尋ねる明確で単純な質問は、必要な確認だけ行い簡潔に直接答える。
+  - 課題発見や施策検討など複雑な質問では、目的に応じた複数の視点で比較・深掘りする。重要な事実と根拠、考えられる原因や別の解釈、優先順位、具体的な検証方法と限界を詳しく示す。一般論は仮説として扱い、因果関係を断定しない。
+  - 分析対象・目的・期間などの不足や候補の曖昧さが結論を左右する場合、勝手に決めず、必要な確認質問を利用者にする。分かっている条件は再質問しない。
+  - 確認質問が必要な場合は回答全体を次のJSON形式だけで返す: {"type":"clarification","question":"質問文","options":["選択肢1","選択肢2"],"selection_mode":"single"}。選択肢は2〜5個、複数選択が必要ならselection_modeをmultiにする。自由記述欄は画面が用意するため選択肢に含めない。通常の回答はJSONにしない。
   - 列の業務定義を使う。未確認の名称は実在値を確認する。
+  - 店舗などの略称は実在する正式名称と照合する。部分一致で得た候補をそのまま一つの店舗として集計せず、意図する対象を特定できなければ質問する。
   - 対象店舗・比較期間・指標を明示し、未完了期間を区別する。
   - 比率や丸めはSQLまたはPythonで計算する。元の数値を推測で補わない。
   - 保存結果を再利用する。根拠の値が見えなければ取得済み結果を確認する。
-  - 目的や対象の不足が結論を変える場合だけ確認する。
   - 質問の文字数・SQL禁止・表示指定を守り、表を文章に再掲しない。
   - 登録されたデータソースの読み取り分析のみ行う。
 """
@@ -42,6 +47,24 @@ FIELD_CONTEXT = {
 def as_dict(message):
     return ca.Message.to_dict(message, use_integers_for_enums=False,
                               always_print_fields_with_no_presence=False)
+
+
+def clarification_answer(answer):
+    try:
+        value = json.loads(answer)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(value, dict) or value.get('type') != 'clarification':
+        return None
+    question, options, mode = value.get('question'), value.get('options'), value.get('selection_mode')
+    if (not isinstance(question, str) or not question.strip() or not isinstance(options, list)
+            or not 2 <= len(options) <= 5 or not all(isinstance(x, str) and x.strip() for x in options)
+            or mode not in ('single', 'multi')):
+        return None
+    options = [x.strip() for x in options]
+    if len(set(options)) != len(options):
+        return None
+    return ClarificationResult(question.strip(), options, mode)
 
 
 def build_agent(settings):
@@ -203,7 +226,7 @@ class ConversationalAnalyticsAgent:
             event['job_lookup_seconds'] = round(time.monotonic() - lookup_started, 6)
             event.update(error=False, status='completed')
             contents.append(types.Content(role='model', parts=[types.Part.from_text(text=answer)]))
-            return AnswerResult(answer)
+            return clarification_answer(answer) or AnswerResult(answer)
         except Exception as exc:
             event['exception'] = technical_detail(exc, limit=10000)
             raise
