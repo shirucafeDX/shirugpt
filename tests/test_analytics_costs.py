@@ -85,23 +85,21 @@ class CostTests(unittest.TestCase):
         self.assertEqual(ctx.session_billed_bytes, 100)
         self.assertEqual(next(iter(second['jobs'].values()))['billed_bytes'], 0)
 
-    def test_cost_fragment_displays_unknown_without_network(self):
+    def test_chat_message_does_not_display_cost(self):
         from streamlit.testing.v1 import AppTest
         source = '''
 import streamlit as st
 from types import SimpleNamespace
-from src.analytics_costs import estimate
-from app import render_analytics_cost
+from app import render_message
 entry = {'started_at':'2026-01-01T00:00:00+00:00','usage':{'status':'pending'},
          'jobs':{},'bq_complete':True,'monitoring_billed_bytes':0}
-entry['estimate'] = estimate(entry)
 st.session_state.ctx = SimpleNamespace(analytics_state={'costs':{'t':entry}, 'native_logging_status':'not_confirmed'})
-render_analytics_cost('t')
+render_message({'role':'assistant','text':'回答','turn_id':'t'}, 0)
 '''
         app = AppTest.from_string(source).run(timeout=20)
         self.assertEqual(len(app.exception), 0)
-        self.assertEqual(len(app.metric), 4)
-        self.assertIn('取得待ち', '\n'.join(c.value for c in app.caption))
+        self.assertEqual(len(app.metric), 0)
+        self.assertNotIn('費用', '\n'.join(c.value for c in app.caption))
 
 
 if __name__ == '__main__':

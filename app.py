@@ -12,7 +12,6 @@ import os
 import tempfile
 import time
 import uuid
-from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Any
 
@@ -22,7 +21,6 @@ from google.genai import types
 
 from src.admin_page import render_admin_page
 from src import analysis_safety
-from src.analytics_costs import refresh_cost
 from src.conversational_analytics import build_agent
 from src.agent import (
     AnswerResult,
@@ -706,57 +704,6 @@ def render_message(message: dict[str, Any], msg_idx: int, shown: set[str] | None
                 for err in errors:
                     st.code(err)
         render_results(message, msg_idx, shown if shown is not None else set())
-        ctx = st.session_state.get('ctx')
-        if ctx is not None and message.get('turn_id') in getattr(ctx, 'analytics_state', {}).get('costs', {}):
-            render_analytics_cost(message['turn_id'])
-
-
-def _usd(value):
-    return '取得待ち' if value is None else f'USD {value:.6f}'
-
-
-@st.fragment(run_every=5)
-def render_analytics_cost(turn_id):
-    ctx = st.session_state.get('ctx')
-    if ctx is None:
-        return
-    entry = ctx.analytics_state.get('costs', {}).get(turn_id)
-    if not entry:
-        return
-    age = time.time() - datetime.fromisoformat(entry.get('finished_at', entry['started_at'])).timestamp()
-    auto = (not st.session_state.get('active_turn') and age < 60
-            and (entry.get('stable_checks', 0) < 1 or not entry.get('bq_complete')))
-    if auto:
-        before = json.dumps(entry, default=str, sort_keys=True)
-        refresh_cost(ctx, turn_id)
-        if before != json.dumps(entry, default=str, sort_keys=True):
-            save_conversation(ctx)
-    costs = entry.get('estimate', {})
-    st.caption('この回答の費用（概算）')
-    columns = st.columns(4)
-    for column, label, key in zip(columns, ('AI・適用後', 'BigQuery', '使用量確認クエリ', '合計'),
-                                 ('ai_usd', 'bq_usd', 'monitoring_usd', 'total_usd')):
-        column.metric(label, _usd(costs.get(key)))
-    if costs.get('promotion_applies'):
-        st.caption('AIは2026年12月31日までの公開無料試用条件を適用。通常単価換算: ' + _usd(costs.get('ai_list_usd')))
-    usage = entry.get('usage', {})
-    if usage.get('prompt_tokens') is not None:
-        st.caption(f"内部入力: {usage['prompt_tokens']:,} · 出力（思考を含む）: {usage.get('output_tokens')} · モデル呼び出し: {usage.get('model_calls')}")
-    else:
-        st.caption('内部トークンはログ取得待ちです。未取得を0として換算しません。')
-    if ctx.analytics_state.get('native_logging_status') == 'not_confirmed':
-        st.caption('Google側の使用量ログ有効化を確認できていません。AI通常単価の算出はログ取得後に行います。')
-    if not entry.get('bq_complete'):
-        st.caption('BigQueryはジョブ照合中。取得済み分: ' + _usd(costs.get('bq_known_usd')))
-    if entry.get('error'):
-        st.caption(entry['error'])
-    if st.button('費用を再取得', key='cost_refresh_' + turn_id, disabled=bool(st.session_state.get('active_turn'))):
-        refresh_cost(ctx, turn_id, force=True)
-        save_conversation(ctx)
-        st.rerun(scope='fragment')
-    entries = ctx.analytics_state.get('costs', {}).values()
-    totals = [e.get('estimate', {}).get('total_usd') for e in entries]
-    st.caption(f"この会話の取得済み概算: USD {sum(v for v in totals if v is not None):.6f} · 未確定 {sum(v is None for v in totals)}件。公開単価、BigQuery無料枠・契約割引・保存費用などの適用前。")
 
 
 def render_sidebar(
@@ -770,7 +717,7 @@ def render_sidebar(
 ) -> None:
     with st.sidebar:
         if getattr(settings, 'analysis_backend', 'gemini') == 'conversational_analytics':
-            st.caption('各回答の概算費用を自動更新します。AI使用量はGoogle側のログが取得できた場合に反映します。')
+            st.caption('会話の分析にはConversational Analytics APIを使用しています。')
         if st.button("新しいチャット", width="stretch", disabled=st.session_state.history_dirty or st.session_state.get("active_turn") is not None):
             reset_conversation(settings, tools, usage_logger, user_email)
             st.rerun()
@@ -781,7 +728,7 @@ def render_sidebar(
             st.divider()
             st.subheader("今月の利用状況")
             if getattr(settings, 'analysis_backend', 'gemini') == 'conversational_analytics':
-                st.caption('月次集計には分析APIのAI費用は未反映です。各回答の概算費用を確認してください。')
+                st.caption('月次集計には分析APIのAI費用は未反映です。')
             ratio = monthly_used_usd / monthly_limit_usd if monthly_limit_usd > 0 else 1.0
             st.progress(min(max(ratio, 0.0), 1.0))
             st.markdown(
