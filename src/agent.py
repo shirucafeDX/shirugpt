@@ -35,7 +35,7 @@ from .config import Settings, human_bytes, gemini_cost_usd
 from .prompts import SYSTEM_INSTRUCTION, build_system_instruction
 from .sql_guard import SQLGuardError, check_sql
 from .thinking import DEFAULT_EFFORT
-from . import interactions, analysis_safety, numeric_grounding, request_audit
+from . import interactions, analysis_safety, result_references, request_audit
 from .usage_log import UsageLogger
 from .execution import ExecutionControl, ExecutionStopped
 from . import context_memory, tool_catalog
@@ -93,6 +93,7 @@ class ToolContext:
     interaction_state: dict[str, Any] = field(default_factory=dict)
     tool_receipts: dict[str, Any] = field(default_factory=dict)
     analysis_cache: dict[str, Any] = field(default_factory=dict)
+    analytics_state: dict[str, Any] = field(default_factory=dict)
     decisions: dict[str, str] = field(default_factory=dict)
     resume_calls: list[Any] | None = None
     execution_control: ExecutionControl | None = None
@@ -354,7 +355,6 @@ def build_declarations() -> list[types.FunctionDeclaration]:
                         "conclusion": types.Schema(type=types.Type.STRING, description="確認した結論と根拠。600文字以内"),
                     }, required=["id", "conclusion"])),
             }, required=["summary", "references", "open_questions", "resolved_questions"])
-    by_name["finish_answer"].parameters.properties["numeric_claims"] = numeric_grounding.claims_schema()
     return declarations
 
 
@@ -397,16 +397,6 @@ class GeminiAgent:
             kwargs["thinking_config"] = types.ThinkingConfig(
                 thinking_budget=self.settings.thinking_budget
             )
-        if ctx is not None:
-            kwargs['tools'] = [tool.model_copy(deep=True) for tool in kwargs['tools']]
-            refs = numeric_grounding.data_refs(ctx)
-            if refs:
-                for tool in kwargs['tools']:
-                    for declaration in tool.function_declarations or []:
-                        if declaration.name == 'finish_answer':
-                            declaration.parameters.required = list(dict.fromkeys([*declaration.parameters.required, 'numeric_claims']))
-                            declaration.parameters.properties['context_note'].properties['references'].items.enum = list(refs)[-12:]
-                            declaration.parameters.properties['numeric_claims'].items.properties['sources'].items.properties['result_ref'].enum = list(refs)[-12:]
         return types.GenerateContentConfig(**kwargs)
 
     def _generate(self, contents: list[types.Content], *, tool_names: list[str] | None = None, ctx: ToolContext | None = None):
@@ -507,28 +497,11 @@ class GeminiAgent:
                 raise BQToolError("answerには空でない最終回答を指定してください。")
             if not isinstance(overview, str) or not overview.strip() or len(overview) > context_memory.OVERVIEW_CHARS:
                 raise BQToolError("conversation_summaryには4000文字以内で会話全体の要点を指定してください。")
-            note = numeric_grounding.normalize_note(ctx, note)
-            try:
-                answer, bindings = numeric_grounding.render(ctx, answer, args.get('numeric_claims'),
-                    require_grounding=analysis_safety.needs_evidence(ctx))
-            except (ValueError, ArithmeticError) as exc:
-                context_memory.state_for(ctx)['numeric_grounding'] = {'turn_id': ctx.turn_id, 'status': 'rejected', 'error': str(exc)}
-                raise BQToolError(str(exc)) from exc
-            if bindings:
-                derived = list(dict.fromkeys(source['result_id'] for binding in bindings for source in binding['sources']))
-                note = {**note, 'references': list(dict.fromkeys([*note.get('references', []), *derived]))} if isinstance(note, dict) else note
+            note = result_references.normalize_note(ctx, note)
             warning = context_memory.validate_note(ctx, note)
             if warning or note is None:
-                context_memory.state_for(ctx)['numeric_grounding']['status'] = 'rejected'
                 raise BQToolError(warning or "context_noteを指定してください。")
-            evidence_error = analysis_safety.validate_answer(ctx, note)
-            if evidence_error:
-                context_memory.state_for(ctx)['numeric_grounding']['status'] = 'rejected'
-                raise BQToolError(evidence_error)
-            if analysis_safety.needs_evidence(ctx):
-                note, overview = numeric_grounding.verified_note(ctx, answer, note, bindings)
             args['context_note'] = note
-            context_memory.state_for(ctx)['numeric_grounding']['status'] = 'verified'
             return {"status": "final_answer", "answer": answer.strip(),
                     "summary": context_memory.factual_summary(note), "overview": overview.strip()}
 
@@ -752,9 +725,9 @@ class GeminiAgent:
             return types.Part.model_validate(ctx.tool_receipts[receipt_key])
 
         if isinstance(args.get('context_note'), dict):
-            args['context_note'] = numeric_grounding.normalize_note(ctx, args['context_note'])
+            args['context_note'] = result_references.normalize_note(ctx, args['context_note'])
         if isinstance(args.get('result_id'), str):
-            args['result_id'] = numeric_grounding.resolve_ref(ctx, args['result_id'])
+            args['result_id'] = result_references.resolve_ref(ctx, args['result_id'])
         started = time.monotonic()
         started_at = datetime.now().astimezone().isoformat()
         try:
@@ -831,7 +804,7 @@ class GeminiAgent:
                 payload = {**payload, "context_note_warning": warning}
             if name != "finish_answer":
                 payload = context_memory.register_result(ctx, name, args, payload)
-                payload = numeric_grounding.attach_ref(ctx, payload)
+                payload = result_references.attach_ref(ctx, payload)
         analysis_safety.record(ctx, name, args, payload)
         part = types.Part.from_function_response(name=name, response=payload)
         part.function_response.id = getattr(call, "id", None)
@@ -1000,13 +973,6 @@ class GeminiAgent:
                     return self._answer(contents, message, ctx=ctx)
 
                 if not calls:
-                    if text and analysis_safety.needs_evidence(ctx):
-                        ctx.turn_errors.append('finish_answerによる実行結果の参照確認を経ていない分析回答を非表示にしました。')
-                        analysis_safety.state(ctx)['next_action'] = '成功した保存結果のIDを確認し、根拠を参照した回答を作り直す。'
-                        analysis_safety.state(ctx)['steps'].append({'tool': 'answer_validation', 'status': 'failed', 'error': 'finish_answerによる根拠の参照確認がありません。'})
-                        # APIが返した元の応答は保持し、状態IDの署名・カーソルを壊さない。
-                        contents.append(candidate.content)
-                        return self._answer(contents, analysis_safety.BLOCKED_ANSWER, ctx=ctx)
                     if not text:
                         self._record_generation_issue(ctx, "empty_response", "text も function_call も返りませんでした。", response, reason)
                     return self._answer(
@@ -1073,24 +1039,6 @@ class GeminiAgent:
             if final_payload is not None:
                 result = self._answer(contents, final_payload["answer"], ctx=ctx)
                 context_memory.finish_turn(contents, ctx, final_payload["summary"], final_payload["overview"])
-                return result
-            scalar = numeric_grounding.scalar_answer(ctx, [(part.function_response.name, part.function_response.response) for part in responses])
-            if scalar is not None and clarification is None:
-                answer, bindings = scalar
-                summary = '取得済みの単一セルから数値回答を確定。' + '; '.join(
-                    f"{source['column']}={binding['rendered']} ({source['result_id']})" for binding in bindings for source in binding['sources'])
-                refs = list(dict.fromkeys(source['result_id'] for binding in bindings for source in binding['sources']))
-                root = context_memory.state_for(ctx)
-                turn_key = root['turns'][-1]['id'] if root['turns'] else ctx.turn_id
-                note = {'summary': summary, 'references': refs, 'open_questions': [],
-                        'resolved_questions': [{'id': key, 'conclusion': '検証済みの保存結果を参照して回答した。'}
-                            for key, item in root['questions'].items() if item['status'] == 'open' and item.get('turn_id') == turn_key]}
-                note, overview = numeric_grounding.verified_note(ctx, answer, note, bindings)
-                context_memory.accept_note(ctx, note)
-                analysis_safety.record(ctx, 'scalar_answer', {}, {'status': 'verified'})
-                result = self._answer(contents, answer, ctx=ctx)
-                context_memory.finish_turn(contents, ctx, note['summary'], overview)
-                analysis_safety.state(ctx)['next_action'] = '数値回答を取得済みセルから確定済み。'
                 return result
             if clarification is not None:
                 # ツール呼出への応答を完結させ、次のユーザー回答を通常の会話として受ける。

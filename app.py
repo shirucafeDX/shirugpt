@@ -12,6 +12,7 @@ import os
 import tempfile
 import time
 import uuid
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Any
 
@@ -21,6 +22,8 @@ from google.genai import types
 
 from src.admin_page import render_admin_page
 from src import analysis_safety
+from src.analytics_costs import refresh_cost
+from src.conversational_analytics import build_agent
 from src.agent import (
     AnswerResult,
     ClarificationResult,
@@ -79,6 +82,8 @@ FEEDBACK_FORM_URL = (
 # --------------------------------------------------------------------
 _SECRET_ENV_KEYS = (
     "GCP_PROJECT_ID",
+    "ANALYSIS_BACKEND", "ANALYTICS_LOCATION", "ANALYTICS_TABLES", "ANALYTICS_TIMEOUT_SECONDS",
+    "ANALYTICS_TRACE_DATASET", "ANALYTICS_TRACE_TABLE",
     "BQ_LOCATION",
     "BQ_DEFAULT_DATASET",
     "BQ_ALLOWED_DATASETS",
@@ -169,7 +174,7 @@ def build_runtime() -> tuple[Settings, BigQueryTools, GeminiAgent, UsageLogger]:
     usage_logger = UsageLogger(settings)
     # ベストエフォート。失敗しても例外は投げず、起動を止めない。
     usage_logger.ensure_table()
-    return settings, BigQueryTools(settings), GeminiAgent(settings), usage_logger
+    return settings, BigQueryTools(settings), build_agent(settings), usage_logger
 
 
 def _new_context(
@@ -532,9 +537,18 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
     runs = message.get("runs") or []
     analyses = message.get("analyses") or []
     events = message.get("execution_events") or []
+    analytics_messages = [e['message'].get('system_message', {}) for e in events
+                          if e.get('event') == 'analytics_message']
+    for system in analytics_messages:
+        spec = system.get('chart', {}).get('result', {}).get('vega_config')
+        if spec:
+            st.vega_lite_chart(spec=spec, width='stretch')
     if not runs and not analyses and not events and not message.get("turn_id") and not message.get("errors"):
         return
     plan = choose_presentation(message.get("question", ""), runs, shown)
+    if analytics_messages:
+        # Managed charts are authoritative; do not guess a second chart with the old renderer.
+        plan.mode = 'none'
     if message.get("is_error") or message.get("is_stopped"):
         plan.mode = "none"
     if plan.mode == "table":
@@ -557,6 +571,8 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
         if events:
             rows = []
             for event in events:
+                if event.get('event') == 'analytics_message':
+                    continue
                 rows.append({"処理": event.get("tool") or event.get("event"),
                              "開始日時": event.get("started_at"), "秒": event.get("seconds"), "状態": event.get("status", ""), "エラー": event.get("error", False),
                              "最初のイベントまで（秒）": event.get("first_event_seconds"),
@@ -567,6 +583,23 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
                              "思考トークン": event.get("thinking_tokens"), "キャッシュ入力": event.get("cached_input_tokens")})
             st.dataframe(pd.DataFrame(rows), hide_index=True)
             st.caption("AI呼び出し時間は通信・再試行待機を含みます。再試行待機の行はAI呼び出し時間の内数です。空欄は未取得です。モデル内部の思考時間は取得できません。")
+        if analytics_messages:
+            st.caption('管理型分析APIの内部トークン量・AI費用は未取得です。0を意味しません。')
+            sqls = []
+            for system in analytics_messages:
+                candidates = [system.get('data', {}).get('generated_sql', '')]
+                if system.get('text', {}).get('text_type') in ('THOUGHT', 'PROGRESS'):
+                    candidates += system['text'].get('parts', [])
+                for sql in candidates:
+                    if sql.strip().upper().startswith(('SELECT', 'WITH')) and sql not in sqls:
+                        sqls.append(sql)
+            if sqls:
+                with st.expander('分析APIのSQL（受信記録）'):
+                    for sql in sqls:
+                        st.code(sql, language='sql')
+                    st.caption('APIから届いたSQLです。実行説明と構造化された結果・ジョブの件数が一致しない場合があります。')
+            with st.expander('分析APIの受信イベント（SQL・結果・分析コード）'):
+                st.json(analytics_messages, expanded=False)
         if any(event.get("sent_tool_results") for event in events):
             with st.expander("ツール結果の送信記録"):
                 receipts = []
@@ -588,6 +621,8 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
                 if summary.get("conversation_summary"):
                     st.write("会話全体の要約", summary["conversation_summary"])
                 note = summary.get("context_note") or {}
+                if summary.get('analytics_context'):
+                    st.json(summary['analytics_context'], expanded=False)
                 if note.get("summary"):
                     st.write("AIの作業メモ（解釈）", note["summary"])
                     if note.get("references"):
@@ -598,17 +633,6 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
                         st.text(step["error"])
                 if summary.get("next_action"):
                     st.write("次の行動", summary["next_action"])
-        grounding = summary.get("numeric_grounding") or {}
-        if grounding:
-            with st.expander("数値の根拠"):
-                st.caption(f"検証状態: {grounding.get('status', '')} · 方法: {grounding.get('mode', '')}")
-                if grounding.get("error"):
-                    st.text(grounding["error"])
-                for binding in grounding.get("bindings", []):
-                    st.write(f"{binding['key']}: {binding['rendered']}")
-                    st.caption(f"計算: {binding.get('formula', binding['operation'])} · 百分率: {binding.get('as_percent', False)} · 小数桁: {binding.get('decimals')}")
-                    st.dataframe(pd.DataFrame(binding["sources"]), hide_index=True)
-                st.caption("行番号は保存済み原表の0始まりです。数値と参照・計算結果を照合しており、文章の意味やSQLの業務定義を完全に証明するものではありません。")
         for error in message.get("errors") or []:
             st.text(error)
         for idx, run in enumerate(runs):
@@ -682,6 +706,57 @@ def render_message(message: dict[str, Any], msg_idx: int, shown: set[str] | None
                 for err in errors:
                     st.code(err)
         render_results(message, msg_idx, shown if shown is not None else set())
+        ctx = st.session_state.get('ctx')
+        if ctx is not None and message.get('turn_id') in getattr(ctx, 'analytics_state', {}).get('costs', {}):
+            render_analytics_cost(message['turn_id'])
+
+
+def _usd(value):
+    return '取得待ち' if value is None else f'USD {value:.6f}'
+
+
+@st.fragment(run_every=5)
+def render_analytics_cost(turn_id):
+    ctx = st.session_state.get('ctx')
+    if ctx is None:
+        return
+    entry = ctx.analytics_state.get('costs', {}).get(turn_id)
+    if not entry:
+        return
+    age = time.time() - datetime.fromisoformat(entry.get('finished_at', entry['started_at'])).timestamp()
+    auto = (not st.session_state.get('active_turn') and age < 60
+            and (entry.get('stable_checks', 0) < 1 or not entry.get('bq_complete')))
+    if auto:
+        before = json.dumps(entry, default=str, sort_keys=True)
+        refresh_cost(ctx, turn_id)
+        if before != json.dumps(entry, default=str, sort_keys=True):
+            save_conversation(ctx)
+    costs = entry.get('estimate', {})
+    st.caption('この回答の費用（概算）')
+    columns = st.columns(4)
+    for column, label, key in zip(columns, ('AI・適用後', 'BigQuery', '使用量確認クエリ', '合計'),
+                                 ('ai_usd', 'bq_usd', 'monitoring_usd', 'total_usd')):
+        column.metric(label, _usd(costs.get(key)))
+    if costs.get('promotion_applies'):
+        st.caption('AIは2026年12月31日までの公開無料試用条件を適用。通常単価換算: ' + _usd(costs.get('ai_list_usd')))
+    usage = entry.get('usage', {})
+    if usage.get('prompt_tokens') is not None:
+        st.caption(f"内部入力: {usage['prompt_tokens']:,} · 出力（思考を含む）: {usage.get('output_tokens')} · モデル呼び出し: {usage.get('model_calls')}")
+    else:
+        st.caption('内部トークンはログ取得待ちです。未取得を0として換算しません。')
+    if ctx.analytics_state.get('native_logging_status') == 'not_confirmed':
+        st.caption('Google側の使用量ログ有効化を確認できていません。AI通常単価の算出はログ取得後に行います。')
+    if not entry.get('bq_complete'):
+        st.caption('BigQueryはジョブ照合中。取得済み分: ' + _usd(costs.get('bq_known_usd')))
+    if entry.get('error'):
+        st.caption(entry['error'])
+    if st.button('費用を再取得', key='cost_refresh_' + turn_id, disabled=bool(st.session_state.get('active_turn'))):
+        refresh_cost(ctx, turn_id, force=True)
+        save_conversation(ctx)
+        st.rerun(scope='fragment')
+    entries = ctx.analytics_state.get('costs', {}).values()
+    totals = [e.get('estimate', {}).get('total_usd') for e in entries]
+    st.caption(f"この会話の取得済み概算: USD {sum(v for v in totals if v is not None):.6f} · 未確定 {sum(v is None for v in totals)}件。公開単価、BigQuery無料枠・契約割引・保存費用などの適用前。")
 
 
 def render_sidebar(
@@ -694,6 +769,8 @@ def render_sidebar(
     monthly_limit_usd: float,
 ) -> None:
     with st.sidebar:
+        if getattr(settings, 'analysis_backend', 'gemini') == 'conversational_analytics':
+            st.caption('各回答の概算費用を自動更新します。AI使用量はGoogle側のログが取得できた場合に反映します。')
         if st.button("新しいチャット", width="stretch", disabled=st.session_state.history_dirty or st.session_state.get("active_turn") is not None):
             reset_conversation(settings, tools, usage_logger, user_email)
             st.rerun()
@@ -703,6 +780,8 @@ def render_sidebar(
         if user_email and settings.logging_enabled and monthly_used_usd is not None:
             st.divider()
             st.subheader("今月の利用状況")
+            if getattr(settings, 'analysis_backend', 'gemini') == 'conversational_analytics':
+                st.caption('月次集計には分析APIのAI費用は未反映です。各回答の概算費用を確認してください。')
             ratio = monthly_used_usd / monthly_limit_usd if monthly_limit_usd > 0 else 1.0
             st.progress(min(max(ratio, 0.0), 1.0))
             st.markdown(
@@ -1005,6 +1084,8 @@ def set_effort(ctx: ToolContext, mode: str) -> str | None:
 
 
 def render_prompt_input(ctx: ToolContext, *, running: bool = False) -> str | None:
+    if getattr(getattr(ctx, 'settings', None), 'analysis_backend', 'gemini') == 'conversational_analytics':
+        return st.chat_input('処理中…' if running else 'ShiruGPT に聞く', key='prompt_input', disabled=running)
     mode = st.session_state.pop("keyboard_effort", None)
     if mode is not None and not running:
         error = set_effort(ctx, mode)
@@ -1044,15 +1125,19 @@ def handle_command(prompt, ctx, settings, tools, usage_logger, user_email,
     command = parse_command(prompt)
     if command is None:
         return False
-    if command.name == "/help" and not command.argument:
-        output = HELP
+    managed = getattr(settings, 'analysis_backend', 'gemini') == 'conversational_analytics'
+    if managed and command.name in ('/effort', '/thinking'):
+        output = '現在は分析APIが調査方法を管理しています。追加で調べたい観点を質問に指定してください。'
+    elif command.name == "/help" and not command.argument:
+        output = ('`/help` コマンド一覧、`/new` 新しい会話、`/model` 分析方式、`/usage` 取得済み使用量を表示します。'
+                  if managed else HELP)
     elif command.name == "/usage" and not command.argument:
         _, end_utc = jst_month_bounds_utc()
         output = usage_text(
             ctx, monthly_used_usd, monthly_limit_usd if user_email else None,
             end_utc.astimezone(ZoneInfo("Asia/Tokyo")),
         )
-        if user_email and getattr(settings, "logging_enabled", False):
+        if user_email and getattr(settings, "logging_enabled", False) and not managed:
             try:
                 output += usage_details_text(usage_logger.usage_details(user_email))
             except Exception as exc:
@@ -1070,7 +1155,7 @@ def handle_command(prompt, ctx, settings, tools, usage_logger, user_email,
             st.rerun()
             return True
     elif command.name == "/model" and not command.argument:
-        output = f"使用中のモデル：`{ctx.settings.gemini_model}`"
+        output = '使用中：Conversational Analytics API（モデルはサービス管理）' if managed else f"使用中のモデル：`{ctx.settings.gemini_model}`"
     elif command.name == "/thinking" and not command.argument:
         if st.session_state.get("pending") is not None:
             output = "実行確認待ちです。現在のクエリを実行または中止してから変更してください。"

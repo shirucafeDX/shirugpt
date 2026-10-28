@@ -183,6 +183,7 @@ class PresentationTests(unittest.TestCase):
         settings.gcp_project = 'test'
         settings.allowed_datasets = ('data',)
         settings.gemini_model = 'gemini-3.8-flash'
+        settings.analysis_backend = 'gemini'
         restored, _, _ = unpack(pack([{'role': 'assistant', 'runs': previous}], [], ctx, None),
                                 ToolContext(tools=Mock(), settings=settings))
         self.assertEqual(restored[0]['runs'][0].chart, original_chart)

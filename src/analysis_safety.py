@@ -1,4 +1,4 @@
-"""確認済みスキーマと実行結果を、SQL作成・最終回答の境界で検証する。"""
+"""SQLの列参照を検査し、取得結果と処理の成否を記録する。"""
 from __future__ import annotations
 
 import hashlib
@@ -9,10 +9,9 @@ from sqlglot import exp
 from sqlglot.errors import OptimizeError
 from sqlglot.optimizer.qualify import qualify
 
-from . import context_memory as memory, numeric_grounding
+from . import context_memory as memory, result_references
 from .sql_guard import SQLGuardError
 
-BLOCKED_ANSWER = "回答の根拠となる実行結果を確認できなかったため、数値を含む分析回答の表示を見送りました。データ・実行詳細で取得結果とエラーを確認できます。"
 
 
 def state(ctx):
@@ -103,16 +102,6 @@ def needs_evidence(ctx):
         current['question']) and not re.search(r'一般的|データを使わず|データ不要', current['question']))
 
 
-def validate_answer(ctx, note):
-    refs = note.get('references', [])
-    for ref in refs:
-        if memory.state_for(ctx)['results'].get(ref, {}).get('payload', {}).get('error'):
-            return '失敗した結果IDは回答の根拠にできません。成功した保存結果を参照してください。'
-    if needs_evidence(ctx) and not has_data_reference(ctx, refs):
-        return '分析回答には成功したSQL・保存済み表・分析結果のresult_idが必要です。一覧・スキーマだけでは数値の根拠になりません。データを取得・修正してからfinish_answerを呼んでください。'
-    return None
-
-
 def record(ctx, name, args, payload):
     current = state(ctx)
     if name in ('run_query', 'analyze_result'):
@@ -140,6 +129,15 @@ def record(ctx, name, args, payload):
 
 
 def snapshot(ctx):
+    analytics = getattr(ctx, 'analytics_state', {})
+    calls = [e for e in ctx.turn_events if e.get('event') == 'analytics_call']
+    if calls:
+        return {'turn_id': ctx.turn_id,
+            'execution_note': f"Conversational Analytics API。取得結果: {len(ctx.turn_runs)}件。",
+            'summary': '会話IDで継続。アプリが作る要約・作業メモは送信していません。',
+            'conversation_summary': '内部の履歴選択・圧縮内容はAPIから公開されません。',
+            'context_note': {}, 'steps': [],
+            'analytics_context': {k: analytics.get(k) for k in ('agent', 'conversation', 'context_sha256', 'authored_context')}}
     current = state(ctx)
     root = memory.state_for(ctx)
     turn = root['turns'][-1] if root['turns'] else {}
@@ -151,7 +149,6 @@ def snapshot(ctx):
         execution_note += "このターンでは有効なデータ結果をまだ取得・参照していません。数値は未確認です。"
     return {'turn_id': ctx.turn_id, 'execution_note': execution_note, 'steps': list(current['steps']),
             'next_action': current['next_action'],
-            'numeric_grounding': root.get('numeric_grounding', {}) if root.get('numeric_grounding', {}).get('turn_id') == ctx.turn_id else {},
             'summary': turn.get('summary', ''), 'conversation_summary': turn.get('overview', ''),
             'context_note': dict(note) if note.get('turn_id') in (ctx.turn_id, turn.get('id')) else {},
             'verified_schemas': {key: [dict(c) for c in value.get('columns', [])] for key, value in ctx.schema_cache.items() if key in current['schema_keys']}}
@@ -169,5 +166,5 @@ def request_context(ctx, tools):
     if needs_evidence(ctx):
         refs = [ref for ref in memory.state_for(ctx)['results'] if has_data_reference(ctx, [ref])][-6:]
         value['available_data_result_ids'] = refs
-        value['available_result_refs'] = {alias: rid for alias, rid in numeric_grounding.data_refs(ctx).items() if rid in refs}
+        value['available_result_refs'] = {alias: rid for alias, rid in result_references.data_refs(ctx).items() if rid in refs}
     return '\nアプリが確認した実行状態（過去の要約より優先。失敗は成功扱いしない）: ' + memory.encoded(value)

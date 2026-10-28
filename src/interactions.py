@@ -22,6 +22,7 @@ from . import request_audit, tool_wire
 logger = logging.getLogger(__name__)
 RETENTION_SECONDS = 7 * 86400
 TOOL_WIRE_FORMAT = "object-values-v1"
+ANSWER_POLICY_VERSION = "plain-text-v1"
 RATE_LIMIT_RETRIES = 3
 MAX_RETRY_WAIT_SECONDS = 30
 
@@ -277,10 +278,12 @@ def generate(client, contents, ctx, config, *, on_progress=None, metrics=None):
     projected = state.get('input_tokens', 0) + state.get('output_tokens', 0) + estimate_tokens(delta)
     near_limit = projected >= int(limit * .8)
     wire_changed = bool(state.get('id')) and state.get('tool_wire_format') != TOOL_WIRE_FORMAT
-    restart = not state.get('id') or not consistent or expired or near_limit or state.get('reset_required') or wire_changed
+    policy_changed = bool(state.get('id')) and state.get('answer_policy') != ANSWER_POLICY_VERSION
+    restart = not state.get('id') or not consistent or expired or near_limit or state.get('reset_required') or wire_changed or policy_changed
     if restart:
         reason = ('initial_or_legacy' if not state.get('id') else 'history_changed' if not consistent
-                  else 'expired' if expired else 'input_budget' if near_limit else 'wire_format_changed' if wire_changed else 'interrupted')
+                  else 'expired' if expired else 'input_budget' if near_limit else 'wire_format_changed' if wire_changed
+                  else 'answer_policy_changed' if policy_changed else 'interrupted')
         steps = (_input(contents) if len(contents) == 1 and memory.is_question(contents[0])
                  else _bootstrap(contents, ctx))
         previous = None
@@ -339,7 +342,8 @@ def generate(client, contents, ctx, config, *, on_progress=None, metrics=None):
     fallback_input = (state.get('input_tokens', 0) + state.get('output_tokens', 0)
                       + max(0, config_estimate - state.get('config_tokens_estimate', 0)) if previous else config_estimate)
     fallback_input += estimate_tokens(body['input'])
-    ctx.interaction_state = {'version': 1, 'tool_wire_format': TOOL_WIRE_FORMAT, 'id': interaction_id, 'identity': identity,
+    ctx.interaction_state = {'version': 1, 'tool_wire_format': TOOL_WIRE_FORMAT, 'answer_policy': ANSWER_POLICY_VERSION,
+                             'id': interaction_id, 'identity': identity,
                              'cursor': len(expected), 'prefix_digest': _digest(expected),
                              'chain_started_at': state.get('chain_started_at', now) if previous else now,
                              'input_tokens': measured_input if measured_input is not None else fallback_input,

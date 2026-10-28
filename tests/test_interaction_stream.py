@@ -154,23 +154,26 @@ class StreamingTests(unittest.TestCase):
         self.assertNotIn('csv', json.dumps(self.requests[2]['input']))
         self.assertTrue(all(s.closed for s in self.streams))
 
-    def test_scalar_answer_keeps_state_for_a_grounded_followup(self):
+    def test_numeric_answer_and_followup_are_generated_by_model_with_state_continuity(self):
         self.contents = [user('取得した数値だけで答えてください。')]
         sql = 'SELECT 1 AS n'
         self.ctx.tools.run_query.return_value = QueryRun(sql, sql, 1, 1, pd.DataFrame({'n': [987654321]}), {})
         first = {'type': 'function_call', 'id': 'q', 'name': 'run_query', 'arguments': {'sql': sql}}
-        final = {'type': 'function_call', 'id': 'f', 'name': 'finish_answer', 'arguments': {
-            'answer': '保存値は{{n}}です。', 'conversation_summary': '保存値を説明',
-            'context_note': {'summary': '保存値を説明', 'references': ['R1']},
-            'numeric_claims': [{'key': 'n', 'operation': 'cell', 'sources': [{'result_ref': 'R1', 'column': 'n', 'row_index': 0}]}]}}
-        with self.sdk([list(events('scalar1', [first])), list(events('scalar2', [final]))]) as client:
+        def finish(identifier, answer):
+            return {'type': 'function_call', 'id': identifier, 'name': 'finish_answer', 'arguments': {
+                'answer': answer, 'conversation_summary': '保存値を説明',
+                'context_note': {'summary': '保存値を説明', 'references': ['R1']}}}
+        replies = [list(events('plain1', [first])),
+                   list(events('plain2', [finish('f1', '987654321')])),
+                   list(events('plain3', [finish('f2', '保存値は987654321です。')]))]
+        with self.sdk(replies) as client:
             agent = GeminiAgent(self.settings, client=client)
             self.assertEqual(agent.run(self.contents, self.ctx).text, '987654321')
             self.ctx.start_turn()
             self.contents.append(user('その数値を説明してください'))
             self.assertEqual(agent.run(self.contents, self.ctx).text, '保存値は987654321です。')
-        self.assertEqual(self.requests[1]['previous_interaction_id'], 'scalar1')
-        self.assertEqual([step['type'] for step in self.requests[1]['input']], ['function_result', 'model_output', 'user_input'])
+        self.assertEqual(self.requests[1]['previous_interaction_id'], 'plain1')
+        self.assertEqual(self.requests[2]['previous_interaction_id'], 'plain2')
         self.ctx.tools.run_query.assert_called_once()
 
     def test_missing_completion_does_not_execute_even_a_complete_function_call(self):

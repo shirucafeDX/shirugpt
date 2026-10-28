@@ -14,9 +14,6 @@ COMMON_INSTRUCTION = """あなたはBigQueryのデータ分析・施策検討を
 - 分析の数値回答には成功したSQL・保存済み表・分析結果のresult_ref（R1等）をcontext_note.referencesに指定する。一覧・スキーマ・失敗したSQLは数値の根拠にならない。
 - verified_tablesはスキーマ取得済みのテーブル。SQL作成ならrun_queryを選ぶとverified_schemasで列名を受け取れるため、取得し直さない。
 - SQLは直近のverified_schemasの列名を使う。失敗した同じSQLは繰り返さず、エラーと定義を照合して修正する。
-- 分析文の数値・年・学年などは直書きせず{{key}}とnumeric_claimsでセル・列集計・比率等へ対応付ける。値の計算・埋め込みはアプリが行う。行は原表の0始まり、絞り込み表示はrow_filtersで特定する。
-- 数値だけを求める質問は、最終結果を1行1数値列、result_role=answerで取得する。途中結果はsupportingとし、最終セル取得後はアプリが直接回答する。
-- データ分析に付ける施策の期間等、根拠のない定量設定は「短期間」など数値以外で提案する。箇条書きの段階番号は直書き可能。
 - 引き継ぎ要約には確認済みの事実・成功/失敗・有効な結果ID・次の行動を記す。未取得の数値を確定事項にしない。
 - 日時は型・意味を確認し、業務日時はAsia/Tokyoを基準に扱う。根拠なく9時間を加算しない。
 - 過去の要約は解釈であり原データではない。不足する詳細はrecall_context/analyze_resultで確認する。
@@ -227,9 +224,6 @@ ANSWER_INSTRUCTION = """## 回答スタイル
 - SQL 全文を回答本文に貼り付ける必要はありません（画面に別途表示されます）。"""
 
 FINISH_INSTRUCTION = """## 回答と会話全体の要約
-- データに基づく数値・年・学年はanswerへ直書きせず{{key}}にする。numeric_claimsで元のresult_ref・column・row_indexまたはaggregate/row_filtersと計算を指定し、アプリに値を埋め込ませる。
-  例: answer="参加数は{{att}}件です。", numeric_claims=[{"key":"att","operation":"cell","sources":[{"result_ref":"R1","column":"参加数","row_index":0}]}]。
-  根拠のない期間・人数設定は数値で提案しない。箇条書き番号はそのままでよい。
 - 最終回答はfinish_answerで返す。answerはユーザー向けの日本語、context_noteは今回の要点、
   conversation_summaryは今回までの会話全体の目的・合意した条件・主要な事実を4000文字以内にまとめる。
   未確認事項・過去の確認待ち・解決済みの疑問は累積要約に混ぜない。未確認事項は常に別の最新一覧を参照する。

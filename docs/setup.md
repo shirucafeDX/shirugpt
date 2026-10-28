@@ -1,5 +1,13 @@
 # セットアップ
 
+## 現在の既定方式
+
+最小構成はConversational Analytics APIです。`geminidataanalytics.googleapis.com`を有効化し、データエージェント・会話の作成と利用、対象BigQueryテーブルの参照とジョブ実行の権限を用意します。
+`.env.example`の`ANALYSIS_BACKEND`と`ANALYTICS_*`を確認してください。データセットは`202506`、初期対象テーブルは`来店`です。
+登録テーブルは認証主体のIAMを置き換えるものではありません。共有公開前には対象データへのアクセス権限を確認してください。
+旧方式のGeminiモデル・思考予算・dry run確認についての説明は`ANALYSIS_BACKEND=gemini`に適用されます。
+新方式の詳細は[Conversational Analytics方式](conversational-analytics.md)を参照してください。
+
 [README](../README.md) の続き。詳細なセットアップ手順です。
 
 ## 1. リポジトリの取得

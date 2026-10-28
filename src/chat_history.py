@@ -21,6 +21,7 @@ from .thinking import DEFAULT_EFFORT
 
 # 実行時オブジェクト、認証情報、月次利用量のベースラインは保存しない。
 CONTEXT_FIELDS = (
+    'analytics_state',
     'interaction_state', 'tool_receipts',
     'active_tool_names', 'analysis_cache', 'context_state', 'schema_cache', 'listing_cache', 'query_cache', 'decisions', 'resume_calls',
     'turn_runs', 'turn_analyses', 'turn_errors', 'turn_prompt_tokens', 'turn_output_tokens',
@@ -76,6 +77,7 @@ def pack(messages, contents, ctx, pending, status='ready') -> bytes:
 
         payload = {
             'version': 1, 'policy': policy(ctx.settings), 'status': status,
+            'backend': getattr(ctx.settings, 'analysis_backend', 'gemini'),
             'messages': encode(messages), 'contents': encode(contents),
             'context': encode({key: getattr(ctx, key) for key in CONTEXT_FIELDS}),
             'pending': asdict(pending) if pending else None,
@@ -138,7 +140,10 @@ def unpack(data, ctx):
         messages, contents = decode(payload['messages']), decode(payload['contents'])
         pending = ConfirmationPending(**payload['pending']) if payload['pending'] else None
         api_changed = bool(ctx.interaction_state) and getattr(ctx.settings, 'gemini_api', 'generate_content') != 'interactions'
-        if payload['policy'][2] != ctx.settings.gemini_model or api_changed:
+        backend = getattr(ctx.settings, 'analysis_backend', 'gemini')
+        backend_changed = payload.get('backend', 'gemini') != backend
+        model_changed = backend == 'gemini' and payload['policy'][2] != ctx.settings.gemini_model
+        if model_changed or api_changed or backend_changed:
             # 別モデルの署名や未完のFunction Callingを送らず、質問と回答を引き継ぐ。
             contents = [types.Content(role='user' if m['role'] == 'user' else 'model',
                                       parts=[types.Part.from_text(text=m['text'])])
@@ -151,6 +156,11 @@ def unpack(data, ctx):
             ctx.interaction_state = {}
             ctx.tool_receipts = {}
             ctx.active_tool_names = []
+            ctx.analytics_state = {}
+            if backend_changed:
+                notice = '分析方式が変更されたため、以前の回答は表示用の履歴として復元しました。分析対象・期間などの条件を改めて指定してください。'
+                messages.append({'role': 'assistant', 'text': notice})
+                contents.append(types.Content(role='model', parts=[types.Part.from_text(text=notice)]))
         if ctx.thinking_mode not in ('low', 'medium', 'high'):
             ctx.thinking_mode = DEFAULT_EFFORT
         if ctx.active_thinking_level not in ('low', 'medium', 'high'):

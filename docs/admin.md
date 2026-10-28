@@ -1,5 +1,7 @@
 # 利用ログ・月次使用制限・管理者ページ
 
+Conversational Analytics方式では`analytics_call`イベントにSQL・結果等の受信イベントと所要時間をJSONで保存します。トークン列はNULLです。BigQueryジョブの取得済み課金対象量も別途記録します。従来のGeminiトークン・費用集計には分析APIのAI費用が含まれないため、総費用を同じ精度で制限できるとは扱いません。[新方式](conversational-analytics.md)も参照してください。
+
 [README](../README.md) の続き。有効化の手順自体は
 [docs/setup.md「GCP 側の準備」](setup.md#3-gcp-側の準備)内の「利用ログを使う場合（任意）」
 を参照してください。ここでは仕組みの詳細を説明します。

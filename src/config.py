@@ -96,6 +96,12 @@ class Settings:
     gemini_api: str = "interactions"
     interaction_max_input_tokens: int = 32000
     gemini_request_timeout_seconds: int = 120
+    analysis_backend: str = 'conversational_analytics'
+    analytics_location: str = 'global'
+    analytics_tables: tuple[str, ...] = ('来店',)
+    analytics_timeout_seconds: int = 300
+    analytics_trace_dataset: str = 'shirugpt_analytics_logs'
+    analytics_trace_table: str = 'agent_events'
 
     def is_dataset_allowed(self, dataset: str) -> bool:
         return dataset in self.allowed_datasets
@@ -190,6 +196,22 @@ def load_settings() -> Settings:
     gemini_timeout = _int("GEMINI_REQUEST_TIMEOUT_SECONDS", 120)
     if gemini_timeout < 1:
         raise ConfigError("GEMINI_REQUEST_TIMEOUT_SECONDSは1以上で指定してください。")
+    backend = _str('ANALYSIS_BACKEND', 'conversational_analytics')
+    if backend not in ('conversational_analytics', 'gemini'):
+        raise ConfigError('ANALYSIS_BACKENDはconversational_analyticsまたはgeminiを指定してください。')
+    analytics_tables = _csv('ANALYTICS_TABLES', '来店')
+    if not analytics_tables or any('.' in name or '`' in name for name in analytics_tables):
+        raise ConfigError('ANALYTICS_TABLESには既定データセット内のテーブル名を指定してください。')
+    analytics_timeout = _int('ANALYTICS_TIMEOUT_SECONDS', 300)
+    if not 1 <= analytics_timeout <= 600:
+        raise ConfigError('ANALYTICS_TIMEOUT_SECONDSは1〜600秒で指定してください。')
+    import re
+    trace_dataset = _str('ANALYTICS_TRACE_DATASET', 'shirugpt_analytics_logs')
+    trace_table = _str('ANALYTICS_TRACE_TABLE', 'agent_events')
+    if not all(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name) for name in (trace_dataset, trace_table)):
+        raise ConfigError('分析APIのログデータセット・テーブル名が不正です。')
+    if trace_dataset in allowed:
+        raise ConfigError('ANALYTICS_TRACE_DATASETを分析対象のデータセットに含めないでください。')
     return Settings(
         gcp_project=project,
         bq_location=_str("BQ_LOCATION") or None,
@@ -216,6 +238,12 @@ def load_settings() -> Settings:
         gemini_api=gemini_api,
         interaction_max_input_tokens=interaction_limit,
         gemini_request_timeout_seconds=gemini_timeout,
+        analysis_backend=backend,
+        analytics_location=_str('ANALYTICS_LOCATION', 'global'),
+        analytics_tables=analytics_tables,
+        analytics_timeout_seconds=analytics_timeout,
+        analytics_trace_dataset=trace_dataset,
+        analytics_trace_table=trace_table,
         **vars(analysis_policy),
     )
 

@@ -45,6 +45,14 @@ def parse_command(text: str) -> Command | None:
 
 
 def usage_text(ctx, monthly_used: float | None, monthly_limit: float | None, reset_at) -> str:
+    if getattr(getattr(ctx, 'settings', None), 'analysis_backend', 'gemini') == 'conversational_analytics':
+        entries = getattr(ctx, 'analytics_state', {}).get('costs', {}).values()
+        totals = [e.get('estimate', {}).get('total_usd') for e in entries]
+        return ('この会話はConversational Analytics APIで分析しています。\n\n'
+                '内部トークンが未取得の場合は0とみなしません。各回答の費用欄で取得状態を確認できます。\n\n'
+                f'この会話の取得済み概算: USD {sum(v for v in totals if v is not None):.6f}、未確定 {sum(v is None for v in totals)}件。\n\n'
+                f'確認済みのBigQuery課金対象量: {human_bytes(ctx.session_billed_bytes)}。\n\n'
+                '実行SQL・ジョブID・応答イベントは各回答の「データ・実行詳細」で確認できます。')
     if monthly_used is None or monthly_limit is None:
         monthly = "月次使用量：取得できません（未ログイン・利用ログ未設定の場合も含みます）。"
     else:

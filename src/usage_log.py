@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -347,6 +348,22 @@ class UsageLogger:
                 "billed_bytes": int(billed_bytes),
             }
         )
+
+    def log_analytics_call(self, *, user_email, session_id, turn_id, details):
+        """管理型APIのイベント。未公開の使用量はNULLのまま記録する。"""
+        self._insert({'event_time': _now_iso(), 'event_type': 'analytics_call',
+            'user_email': user_email or UNKNOWN_USER, 'session_id': session_id,
+            'turn_id': turn_id, 'api': 'conversational_analytics',
+            'model': 'managed-data-agent',
+            'error_text': json.dumps(details, ensure_ascii=False, default=str)})
+
+    def log_analytics_cost(self, *, user_email, session_id, turn_id, details):
+        # Refreshes are snapshots, not additive usage events. Keep usage in JSON so
+        # legacy SUM(token columns) cannot count the same turn repeatedly.
+        self._insert({'event_time': _now_iso(), 'event_type': 'analytics_cost',
+            'user_email': user_email or UNKNOWN_USER, 'session_id': session_id, 'turn_id': turn_id,
+            'api': 'conversational_analytics', 'model': 'managed-data-agent',
+            'error_text': json.dumps(details, ensure_ascii=False, default=str)})
 
     def log_error(
         self,

@@ -15,6 +15,7 @@ with patch.dict(os.environ, {{
     'BQ_ALLOWED_DATASETS':'allowed', 'GOOGLE_APPLICATION_CREDENTIALS':'',
     'BQ_LOG_DATASET':'', 'ADMIN_EMAILS':'admin@example.com', 'ADMIN_ALLOW_LOCAL':'false',
     'SAMPLE_ROWS':'100', 'GEMINI_THINKING_BUDGET':'10000',
+    'ANALYSIS_BACKEND':'gemini',
 }}):
     settings = load_settings()
 logger = Mock()

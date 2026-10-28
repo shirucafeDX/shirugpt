@@ -133,6 +133,19 @@ def render_admin_page(settings: Settings, logger: UsageLogger, viewer_email: str
 def _render_settings_tab(settings: Settings) -> None:
     st.subheader("現在適用中の設定")
     st.caption("起動時に読み込んだ設定です。環境変数や Secrets の変更後はアプリを再起動してください。")
+    if getattr(settings, 'analysis_backend', 'gemini') == 'conversational_analytics':
+        rows = [('分析方式', 'Conversational Analytics API'),
+            ('対象データセット', settings.default_dataset),
+            ('対象テーブル', ', '.join(settings.analytics_tables)),
+            ('APIリージョン', settings.analytics_location),
+            ('APIタイムアウト', f'{settings.analytics_timeout_seconds} 秒'),
+            ('クエリ課金対象量上限', human_bytes(settings.max_bytes_billed)),
+            ('Python分析', '有効（Google管理の実行環境）'),
+            ('会話の継続', 'API会話ID＋新しい質問'),
+            ('内部トークン・AI費用', '未取得'),
+            ('利用ログ', '有効' if settings.logging_enabled else '無効')]
+        st.dataframe(pd.DataFrame(rows, columns=['設定項目', '適用値']), width='stretch', hide_index=True)
+        return
     thinking = (
         f"{DEFAULT_EFFORT.title()}（/effortでLow・Medium・Highを選択）" if settings.gemini_model == "gemini-3.8-flash" else
         "未指定（モデル既定）" if settings.thinking_budget is None else
@@ -142,6 +155,8 @@ def _render_settings_tab(settings: Settings) -> None:
     )
     # 認証キー・パス・管理者メール等を誤って表示しないよう、明示した項目だけを使う。
     rows = [
+        ('分析方式', getattr(settings, 'analysis_backend', 'gemini')),
+        ('分析APIの対象テーブル', ', '.join(getattr(settings, 'analytics_tables', ()))),
         ("モデル", settings.gemini_model),
         ("Gemini API", getattr(settings, 'gemini_api', 'generate_content')),
         ("状態引き継ぎの入力基準", f"{getattr(settings, 'interaction_max_input_tokens', 32000):,} トークン（80%で要点へ引き継ぎ）"),

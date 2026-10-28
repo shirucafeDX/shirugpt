@@ -161,7 +161,7 @@ class CatalogTests(unittest.TestCase):
         run = QueryRun(sql, sql, 20, 20, pd.DataFrame({'n': [1]}), {'row_count': 1})
         self.tools.run_query.side_effect = [ConfirmationRequired(sql, 20, 10, []), run]
         self.client.models.generate_content.side_effect = [response('run_query', {'sql': sql}), response('finish_answer', {
-            'answer': '{{n}}件です。', 'numeric_claims': [{'key': 'n', 'operation': 'cell', 'sources': [{'result_ref': result_id_for('run_query', {'sql': sql}), 'column': 'n', 'row_index': 0}]}], 'context_note': note([result_id_for('run_query', {'sql': sql})]),
+            'answer': '1件です。', 'context_note': note([result_id_for('run_query', {'sql': sql})]),
             'conversation_summary': '- 1件と確認。'})]
         contents = [user()]
         pending = self.agent.run(contents, self.ctx)

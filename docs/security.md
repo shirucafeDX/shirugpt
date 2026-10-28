@@ -1,5 +1,7 @@
 # 安全機構の一覧
 
+以下のsql_guard・dry run確認は従来の`ANALYSIS_BACKEND=gemini`に適用されます。現在の既定方式ではサービス内部でSQLが実行されるため、同じ検査が働くとは扱いません。IAMとAPI側の課金上限など、[新方式の権限と費用](conversational-analytics.md#権限費用停止の変更)を確認してください。
+
 [README](../README.md) の続き。
 
 | 対策 | 内容 | 実装 |

@@ -1,5 +1,7 @@
 # 仕組み
 
+この文書は`ANALYSIS_BACKEND=gemini`の従来方式を説明します。現在の既定方式は[Conversational Analytics方式](conversational-analytics.md)です。
+
 [README](../README.md) の続き。ShiruGPT の内部構造の詳細解説です。
 
 ## チャットコマンド

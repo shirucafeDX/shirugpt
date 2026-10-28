@@ -267,6 +267,23 @@ class InteractionTests(unittest.TestCase):
         self.assertEqual(self.ctx.interaction_state['last_reset_reason'], 'wire_format_changed')
         self.assertEqual(self.ctx.interaction_state['tool_wire_format'], interactions.TOOL_WIRE_FORMAT)
 
+    def test_old_numeric_policy_state_is_rebuilt_once_and_then_continues(self):
+        client = Mock()
+        client.interactions.create.side_effect = [interaction('old', [output('旧回答')]),
+            interaction('new', [output('一人あたり3回です')]), interaction('continued', [output('次の回答')])]
+        agent = GeminiAgent(self.settings, client=client)
+        agent.run(self.contents, self.ctx)
+        self.ctx.interaction_state.pop('answer_policy')
+        self.ctx.start_turn()
+        self.contents.append(user('追加質問'))
+        agent.run(self.contents, self.ctx)
+        self.assertNotIn('previous_interaction_id', client.interactions.create.call_args.kwargs)
+        self.assertEqual(self.ctx.interaction_state['last_reset_reason'], 'answer_policy_changed')
+        self.ctx.start_turn()
+        self.contents.append(user('続けて'))
+        agent.run(self.contents, self.ctx)
+        self.assertEqual(client.interactions.create.call_args.kwargs['previous_interaction_id'], 'new')
+
     def test_changed_history_or_project_starts_new_state(self):
         client=Mock()
         client.interactions.create.side_effect=[interaction('state-1',[output('回答')]),interaction('state-2',[output('新規')])]
@@ -349,8 +366,7 @@ class InteractionTests(unittest.TestCase):
         self.assertIsNone(restored.resume_calls)
         self.assertEqual(restored.interaction_state,{})
 
-    def test_rejected_prose_keeps_state_id_and_original_response_prefix(self):
-        from src.analysis_safety import BLOCKED_ANSWER
+    def test_plain_prose_keeps_state_id_without_an_added_block_message(self):
         frame = pd.DataFrame({'value': [1]})
         self.ctx.tools.run_query.return_value = QueryRun('SELECT 1', 'SELECT 1', 1, 1, frame, {'row_count': 1})
         replies = [interaction('safe-1', [call('run_query', {'sql': 'SELECT 1'})]),
@@ -358,15 +374,12 @@ class InteractionTests(unittest.TestCase):
                    interaction('safe-3', [output('再確認が必要です')])]
         with self.sdk(replies) as client:
             agent = GeminiAgent(self.settings, client=client)
-            self.assertEqual(agent.run(self.contents, self.ctx).text, BLOCKED_ANSWER)
+            self.assertEqual(agent.run(self.contents, self.ctx).text, '来店数は999件です')
             self.ctx.start_turn()
             self.contents.append(user('続けて'))
             agent.run(self.contents, self.ctx)
         self.assertEqual(self.requests[2]['previous_interaction_id'], 'safe-2')
-        self.assertEqual(self.requests[2]['input'][0]['type'], 'model_output')
-        self.assertEqual(self.requests[2]['input'][0]['content'][0]['text'], BLOCKED_ANSWER)
-        self.assertEqual(self.requests[2]['input'][1]['content'][0]['text'], '続けて')
-        self.assertNotIn('999', json.dumps(self.requests[2]['input'], ensure_ascii=False))
+        self.assertEqual(self.requests[2]['input'], [{'type': 'user_input', 'content': [{'type': 'text', 'text': '続けて'}]}])
         self.ctx.tools.run_query.assert_called_once()
 
     def test_current_turn_result_can_be_found_after_catalogue_is_shortened(self):
@@ -385,7 +398,7 @@ class InteractionTests(unittest.TestCase):
         self.ctx.tools.run_query.return_value=QueryRun('SELECT 1','SELECT 1',1,1,frame,{'row_count':2})
         self.ctx.active_tool_names=['run_query']
         replies=[interaction('state-1',[call('run_query',{'sql':'SELECT 1'})]),
-                 interaction('state-2',[call('finish_answer', {'answer': '合計は{{total}}', 'conversation_summary': '合計は3', 'context_note': {'summary': '合計は3', 'references': [memory.result_id_for('run_query', {'sql': 'SELECT 1'})]}, 'numeric_claims': [{'key': 'total', 'operation': 'cell', 'sources': [{'result_ref': memory.result_id_for('run_query', {'sql': 'SELECT 1'}), 'column': 'value', 'aggregate': 'sum'}]}]})]),interaction('state-3',[output('説明')])]
+                 interaction('state-2',[final_call('合計は3')]),interaction('state-3',[output('説明')])]
         with self.sdk(replies) as client:
             agent=GeminiAgent(self.settings,client=client)
             agent.run(self.contents,self.ctx)

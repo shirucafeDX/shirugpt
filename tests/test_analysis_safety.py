@@ -1,4 +1,4 @@
-"""誤った列・失敗SQL・根拠なし回答を止め、引き継ぎ要約を保存する。"""
+"""誤った列・失敗SQLを止め、回答と引き継ぎ要約を保存する。"""
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -108,12 +108,12 @@ class AnalysisSafetyTests(unittest.TestCase):
             safety.verify_columns('SELECT x.missing FROM (SELECT store FROM `test.202506.来店`) x',
                                   ['test.202506.来店'], schemas)
 
-    def test_metadata_and_failed_results_cannot_support_data_answer(self):
+    def test_finish_accepts_prose_without_numeric_evidence_but_memo_rejects_failed_ids(self):
         safety.state(self.ctx)['data_requested'] = True
         meta = self.dispatch('list_tables', {'dataset': '202506'})['result_id']
-        args = {'answer': '取得値を確認しました', 'conversation_summary': '248件だった',
+        args = {'answer': '来店数は248件です', 'conversation_summary': '248件だった',
                 'context_note': {'summary': '248件だった', 'references': [meta]}}
-        self.assertIn('result_id', self.dispatch('finish_answer', args)['error'])
+        self.assertEqual(self.dispatch('finish_answer', args)['answer'], '来店数は248件です')
         memory.state_for(self.ctx)['results']['failed'] = {'payload': {'error': 'SQL failed'}}
         args['context_note']['references'] = ['failed']
         self.assertIn('失敗', self.dispatch('finish_answer', args)['error'])
@@ -122,7 +122,7 @@ class AnalysisSafetyTests(unittest.TestCase):
     def test_successful_query_and_valid_finish_answer_keep_summaries_and_references(self):
         rid = memory.result_id_for('run_query', {'sql': self.good_sql})
         self.agent._generate = Mock(side_effect=[reply('run_query', {'sql': self.good_sql}),
-            reply('finish_answer', {'answer': '京大前店は{{n}}件です。', 'numeric_claims': [{'key': 'n', 'operation': 'cell', 'sources': [{'result_ref': rid, 'column': 'n', 'row_index': 0}]}], 'conversation_summary': '京大前店の来店数は12件。',
+            reply('finish_answer', {'answer': '京大前店は12件です。', 'conversation_summary': '京大前店の来店数は12件。',
                 'context_note': {'summary': '確認した来店数は12件。', 'references': [rid]}})])
         contents = [user('京大店の来店数推移')]
         result = self.agent.run(contents, self.ctx)
@@ -139,26 +139,24 @@ class AnalysisSafetyTests(unittest.TestCase):
         self.ctx.start_turn()
         self.assertIn('12件', saved[0]['execution_summary']['summary'])
 
-    def test_plain_answer_cannot_bypass_rejected_finish_answer(self):
+    def test_plain_answer_is_displayed_after_memo_validation_error(self):
         self.agent._generate = Mock(side_effect=[reply('run_query', {'sql': self.bad_sql}),
             reply('finish_answer', {'answer': '248件です', 'conversation_summary': '248件',
                 'context_note': {'summary': '248件', 'references': ['invented']}}), reply(text='248件です')])
         contents = [user('来店数の推移')]
         result = self.agent.run(contents, self.ctx)
-        self.assertEqual(result.text, safety.BLOCKED_ANSWER)
-        self.assertNotIn('248', result.text)
+        self.assertEqual(result.text, '248件です')
         self.ctx.tools.run_query.assert_not_called()
         summary = safety.snapshot(self.ctx)
         self.assertFalse(summary['summary'])
         self.assertTrue(any(step['status'] == 'failed' for step in summary['steps']))
-        self.assertIn('根拠', summary['next_action'])
 
-    def test_followup_cannot_use_unvalidated_prose_to_make_data_claims(self):
+    def test_followup_displays_model_prose_without_numeric_verification(self):
         self.dispatch('run_query', {'sql': self.good_sql})
         self.ctx.start_turn()
         self.agent._generate = Mock(return_value=reply(text='前年は999件でした'))
         result = self.agent.run([user('前年は？')], self.ctx)
-        self.assertEqual(result.text, safety.BLOCKED_ANSWER)
+        self.assertEqual(result.text, '前年は999件でした')
 
     def test_general_advice_after_data_does_not_require_irrelevant_result_references(self):
         self.dispatch('run_query', {'sql': self.good_sql})
@@ -175,7 +173,6 @@ class AnalysisSafetyTests(unittest.TestCase):
         self.ctx.start_turn()
         recalled = self.dispatch('recall_context', {'result_id': source})
         self.assertTrue(safety.has_data_reference(self.ctx, [recalled['result_id']]))
-        self.assertIsNone(safety.validate_answer(self.ctx, {'references': [recalled['result_id']]}))
         self.ctx.tools.run_query.assert_called_once()
 
     def test_execution_detail_renders_ai_summary_failure_and_next_action(self):
