@@ -77,6 +77,16 @@ class AnalyticsTests(unittest.TestCase):
         self.agents.create_data_agent_sync.assert_not_called()
         self.chat.chat.assert_not_called()
 
+    def test_all_tables_are_discovered_and_visit_rules_stay_on_visit_table(self):
+        self.backend.settings = replace(self.settings, analytics_tables=('*',))
+        self.tools.list_tables.return_value = {'tables': [{'table': '来店'}, {'table': 'other'}]}
+        self.tools.get_table_schema.return_value = {'columns': [{'name': 'connected_id', 'type': 'STRING'}]}
+        context = self.backend._context(self.ctx)
+        refs = {r.table_id: r for r in context.datasource_references.bq.table_references}
+        self.assertEqual(set(refs), {'来店', 'other'})
+        self.assertIn('来店者数', refs['来店'].schema.fields[0].description)
+        self.assertNotIn('来店者数', refs['other'].schema.fields[0].description)
+
     def test_results_after_final_response_are_retained_and_sql_is_grouped(self):
         events = [message({'text': {'text_type': 'THOUGHT', 'parts': ['進行説明']}}),
             message({'text': {'text_type': 'FINAL_RESPONSE', 'parts': ['582人']}}),

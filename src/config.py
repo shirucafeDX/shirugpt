@@ -98,7 +98,7 @@ class Settings:
     gemini_request_timeout_seconds: int = 120
     analysis_backend: str = 'conversational_analytics'
     analytics_location: str = 'global'
-    analytics_tables: tuple[str, ...] = ('来店',)
+    analytics_tables: tuple[str, ...] = ('*',)
     analytics_timeout_seconds: int = 300
     analytics_trace_dataset: str = 'shirugpt_analytics_logs'
     analytics_trace_table: str = 'agent_events'
@@ -199,9 +199,11 @@ def load_settings() -> Settings:
     backend = _str('ANALYSIS_BACKEND', 'conversational_analytics')
     if backend not in ('conversational_analytics', 'gemini'):
         raise ConfigError('ANALYSIS_BACKENDはconversational_analyticsまたはgeminiを指定してください。')
-    analytics_tables = _csv('ANALYTICS_TABLES', '来店')
+    analytics_tables = _csv('ANALYTICS_TABLES', '*')
     if not analytics_tables or any('.' in name or '`' in name for name in analytics_tables):
         raise ConfigError('ANALYTICS_TABLESには既定データセット内のテーブル名を指定してください。')
+    if '*' in analytics_tables and len(analytics_tables) != 1:
+        raise ConfigError('ANALYTICS_TABLESの*は単独で指定してください。')
     analytics_timeout = _int('ANALYTICS_TIMEOUT_SECONDS', 300)
     if not 1 <= analytics_timeout <= 600:
         raise ConfigError('ANALYTICS_TIMEOUT_SECONDSは1〜600秒で指定してください。')

@@ -95,7 +95,9 @@ class ConversationalAnalyticsAgent:
             listing = ctx.tools.list_tables(dataset)
             ctx.listing_cache[dataset] = listing
         available = {item['table'] for item in listing['tables']}
-        names = self.settings.analytics_tables
+        names = tuple(sorted(available)) if self.settings.analytics_tables == ('*',) else self.settings.analytics_tables
+        if not names:
+            raise BQToolError('分析対象データセットにテーブルがありません。')
         unknown = set(names) - available
         if unknown:
             raise BQToolError('分析対象に存在しないテーブルがあります: ' + ', '.join(sorted(unknown)))
@@ -110,7 +112,7 @@ class ConversationalAnalyticsAgent:
                                             dataset_id=dataset, table_id=name)
             ref.schema.description = schema.get('description', '')
             ref.schema.fields = [ca.Field(name=c['name'], type_=c['type'],
-                                          description=' '.join(filter(None, [c.get('description', ''), FIELD_CONTEXT.get(c['name'], '')])))
+                                          description=' '.join(filter(None, [c.get('description', ''), FIELD_CONTEXT.get(c['name'], '') if name == '来店' else ''])))
                                  for c in schema['columns']]
             refs.append(ref)
         context.datasource_references.bq.table_references = refs
