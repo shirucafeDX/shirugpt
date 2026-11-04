@@ -20,6 +20,7 @@ import streamlit as st
 from google.genai import types
 
 from src.admin_page import render_admin_page
+from src.copy_button import render_copy_button
 from src import analysis_safety
 from src.conversational_analytics import build_agent
 from src.agent import (
@@ -697,6 +698,8 @@ def render_message(message: dict[str, Any], msg_idx: int, shown: set[str] | None
             st.warning(message["text"])
         else:
             st.markdown(message["text"])
+        if message["role"] == "assistant" and message.get("text"):
+            render_copy_button(message["text"], key=f"answer_copy_{msg_idx}")
 
         errors = message.get("errors") or []
         if errors:
