@@ -2,14 +2,33 @@ export default function ({ data, parentElement }) {
   const icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>';
   const button = document.createElement('button');
   button.type = 'button';
-  button.title = '回答をコピー';
   button.setAttribute('aria-label', '回答をコピー');
   button.innerHTML = icon;
   button.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;background:transparent;color:inherit;border:1px solid #8885;border-radius:6px;cursor:pointer;';
   const status = document.createElement('span');
   status.setAttribute('role', 'status');
   status.style.cssText = 'margin-left:8px;font-size:12px;';
-  parentElement.replaceChildren(button, status);
+  const wrapper = document.createElement('span');
+  wrapper.className = 'answer-copy-control';
+  const tooltip = document.createElement('span');
+  tooltip.id = `copy-tooltip-${crypto.randomUUID()}`;
+  tooltip.className = 'answer-copy-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.textContent = '回答をコピー';
+  button.setAttribute('aria-describedby', tooltip.id);
+  const style = document.createElement('style');
+  style.textContent = `
+    .answer-copy-control { position: relative; display: inline-flex; vertical-align: middle; }
+    .answer-copy-tooltip {
+      position: absolute; left: 42px; top: 50%; transform: translateY(-50%);
+      padding: 5px 8px; border-radius: 5px; background: #262730; color: #fff;
+      font-size: 12px; white-space: nowrap; pointer-events: none; visibility: hidden; z-index: 1;
+    }
+    .answer-copy-control:hover .answer-copy-tooltip,
+    .answer-copy-control:focus-within .answer-copy-tooltip { visibility: visible; }
+  `;
+  wrapper.append(button, tooltip);
+  parentElement.replaceChildren(style, wrapper, status);
   button.addEventListener('click', async () => {
     const text = String(data?.text ?? '');
     button.disabled = true;
@@ -31,7 +50,6 @@ export default function ({ data, parentElement }) {
         }
       }
       button.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
-      button.title = 'コピーしました';
       button.setAttribute('aria-label', 'コピーしました');
     } catch {
       status.textContent = 'コピーできませんでした。ブラウザーの権限をご確認ください。';
