@@ -196,8 +196,25 @@ def init_state(
     usage_logger: UsageLogger,
     user_email: str,
 ) -> ToolContext:
-    if st.session_state.get("conversation_owner") != user_email:
+    selected = st.query_params.get('conversation')
+    if st.session_state.get("conversation_owner") != user_email or 'ctx' not in st.session_state:
         reset_conversation(settings, tools, usage_logger, user_email)
+    if selected and selected != st.session_state.history_id:
+        st.query_params['conversation'] = selected
+        if st.session_state.get('active_turn') is not None or st.session_state.history_dirty:
+            st.error('処理中または未保存の会話があります。会話の切り替えを完了できません。')
+        elif user_email and settings.chat_history_bucket:
+            open_conversation(settings, tools, usage_logger, user_email,
+                              history_store(settings.chat_history_bucket, settings.gcp_project), selected)
+        else:
+            st.error('この会話を復元するには、履歴保存の設定とログインが必要です。')
+        # 復元失敗時に新しい会話へ質問を誤送信しない。
+        if st.button('会話の復元を再試行', key='retry_url_conversation'):
+            st.rerun()
+        if st.button('新しいチャットを開始', key='discard_url_conversation'):
+            reset_conversation(settings, tools, usage_logger, user_email)
+            st.rerun()
+        st.stop()
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "contents" not in st.session_state:
@@ -243,6 +260,7 @@ def reset_conversation(
     st.session_state.history_dirty = False
     st.session_state.history_error = ""
     st.session_state.history_status = "ready"
+    st.query_params.pop('conversation', None)
 
 
 @st.cache_resource(show_spinner=False)
@@ -274,6 +292,7 @@ def save_conversation(ctx: ToolContext, status: str = "ready") -> None:
             st.session_state.history_generation,
         )
         st.session_state.history_generation = generation
+        st.query_params['conversation'] = st.session_state.history_id
         history_cache(ctx.settings, ctx.user_email).remember(st.session_state.history_id, data, generation)
         st.session_state.history_dirty = False
         st.session_state.history_error = ""
@@ -426,6 +445,7 @@ def open_conversation(settings, tools, usage_logger, user_email, store, selected
         st.session_state.ctx = new_ctx
         st.session_state.history_id = selected
         st.session_state.history_generation = generation
+        st.query_params['conversation'] = selected
         # 開いた会話の最新世代を反映する。履歴一覧の再取得はしない。
         for entry in st.session_state.get("history_entries", []):
             if entry["id"] == selected:
@@ -774,7 +794,7 @@ def process_turn(agent: GeminiAgent, ctx: ToolContext) -> None:
     try:
         st.markdown("""
 <style>
-.st-key-prompt_input [data-testid="stChatInputSubmitButton"] { visibility: hidden; }
+[class*="st-key-prompt_input"] [data-testid="stChatInputSubmitButton"] { visibility: hidden; }
 .st-key-execution_stop { position: fixed; display: none; z-index: 10001; }
 .st-key-execution_stop button {
     border-radius: 50%; width: 2rem; height: 2rem;
@@ -906,6 +926,10 @@ def submit_prompt(
     # コマンドはUI側の専用経路だけで扱う。直接呼び出されてもモデルへ送らない。
     if parse_command(prompt) is not None:
         raise ValueError("コマンドは質問として送信できません。")
+    if st.session_state.get('ctx') is not ctx:
+        raise ValueError('会話が切り替わりました。表示中の会話からもう一度送信してください。')
+    if st.session_state.get('active_turn') is not None:
+        raise ValueError('この会話は処理中です。回答を待ってから送信してください。')
     st.session_state.pop("command_output", None)
     message = {"role": "user", "text": prompt}
     if question is not None:
@@ -1035,7 +1059,8 @@ def set_effort(ctx: ToolContext, mode: str) -> str | None:
 
 def render_prompt_input(ctx: ToolContext, *, running: bool = False) -> str | None:
     if getattr(getattr(ctx, 'settings', None), 'analysis_backend', 'gemini') == 'conversational_analytics':
-        return st.chat_input('処理中…' if running else 'ShiruGPT に聞く', key='prompt_input', disabled=running)
+        return st.chat_input('処理中…' if running else 'ShiruGPT に聞く',
+                             key=f'prompt_input_{ctx.session_id}', disabled=running)
     mode = st.session_state.pop("keyboard_effort", None)
     if mode is not None and not running:
         error = set_effort(ctx, mode)

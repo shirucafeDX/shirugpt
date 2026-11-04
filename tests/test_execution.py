@@ -126,6 +126,41 @@ st.session_state['resume_cleared'] = ctx.resume_calls is None
 
 
 class PromptExecutionUITests(unittest.TestCase):
+    def test_stale_context_cannot_submit_into_current_conversation(self):
+        source = '''
+from types import SimpleNamespace
+import streamlit as st
+from app import submit_prompt
+st.session_state.ctx = SimpleNamespace(session_id='current')
+st.session_state.messages = []
+st.session_state.contents = []
+try:
+    submit_prompt('別の会話への質問', None, SimpleNamespace(session_id='old'))
+except ValueError as exc:
+    st.session_state.rejection = str(exc)
+'''
+        app = AppTest.from_string(source).run(timeout=20)
+        self.assertFalse(app.exception)
+        self.assertIn('会話が切り替わりました', app.session_state.rejection)
+        self.assertEqual(app.session_state.messages, [])
+        self.assertEqual(app.session_state.contents, [])
+
+    def test_managed_input_is_scoped_to_conversation(self):
+        source = '''
+from types import SimpleNamespace
+from app import render_prompt_input
+import streamlit as st
+ctx = SimpleNamespace(session_id=st.session_state.get('conversation', 'first'),
+                      settings=SimpleNamespace(analysis_backend='conversational_analytics'))
+render_prompt_input(ctx)
+'''
+        app = AppTest.from_string(source).run(timeout=20)
+        first = app.chat_input[0].key
+        app.session_state.conversation = 'second'
+        app.run()
+        self.assertFalse(app.exception)
+        self.assertNotEqual(first, app.chat_input[0].key)
+
     def test_normal_submission_replaces_input_without_duplicate_widgets(self):
         source = '''
 from types import SimpleNamespace

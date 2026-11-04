@@ -300,3 +300,55 @@ st.session_state['keys'] = list(cache.payloads)
         self.assertTrue(app.session_state['keys'])
         app.selectbox[0].select('b@example.com').run()
         self.assertFalse(app.session_state['keys'])
+
+
+class URLConversationTests(unittest.TestCase):
+    SOURCE = '''
+from dataclasses import replace
+from unittest.mock import Mock, patch
+import streamlit as st
+from src.config import load_settings
+from src.agent import ToolContext
+from src.chat_history import pack
+from app import init_state, reset_conversation
+s = replace(load_settings(), chat_history_bucket='test-bucket')
+tools, usage = Mock(), Mock()
+saved = ToolContext(settings=s, tools=tools, user_email='a@example.com')
+saved.session_id = 'original-session'
+saved.analytics_state = {'conversation':'original-api-conversation'}
+store = Mock()
+store.load.return_value = (pack([{'role':'user','text':'保存した質問'}], [], saved, None), 7)
+if st.session_state.get('load_failure'):
+    store.load.side_effect = RuntimeError('unavailable')
+with patch('app.history_store', return_value=store):
+    ctx = init_state(s, tools, usage, 'a@example.com')
+st.session_state.reached_input = True
+st.write(ctx.session_id)
+if st.button('新規'):
+    reset_conversation(s, tools, usage, 'a@example.com')
+    st.rerun()
+'''
+
+    def test_reconnect_restores_selected_history_and_api_conversation(self):
+        app = AppTest.from_string(self.SOURCE)
+        app.query_params['conversation'] = 'a' * 32
+        app.run(timeout=20)
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state.ctx.session_id, 'original-session')
+        self.assertEqual(app.session_state.ctx.analytics_state['conversation'], 'original-api-conversation')
+        self.assertEqual(app.session_state.history_generation, 7)
+        self.assertEqual(app.query_params['conversation'], ['a' * 32])
+        app.button[0].click().run()
+        self.assertFalse(app.exception)
+        self.assertNotIn('conversation', app.query_params)
+        self.assertNotEqual(app.session_state.ctx.session_id, 'original-session')
+
+    def test_restore_failure_blocks_input_and_keeps_url(self):
+        app = AppTest.from_string(self.SOURCE)
+        app.query_params['conversation'] = 'a' * 32
+        app.session_state.load_failure = True
+        app.run(timeout=20)
+        self.assertFalse(app.exception)
+        self.assertNotIn('reached_input', app.session_state)
+        self.assertTrue(app.error)
+        self.assertEqual(app.query_params['conversation'], ['a' * 32])
