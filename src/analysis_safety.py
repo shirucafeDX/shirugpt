@@ -134,8 +134,6 @@ def snapshot(ctx):
     if calls:
         return {'turn_id': ctx.turn_id,
             'execution_note': f"Conversational Analytics API。取得結果: {len(ctx.turn_runs)}件。",
-            'summary': '会話IDで継続。アプリが作る要約・作業メモは送信していません。',
-            'conversation_summary': '内部の履歴選択・圧縮内容はAPIから公開されません。',
             'context_note': {}, 'steps': [],
             'analytics_context': {k: analytics.get(k) for k in ('agent', 'conversation', 'context_sha256', 'authored_context')}}
     current = state(ctx)

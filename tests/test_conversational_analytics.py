@@ -164,6 +164,24 @@ render_results({'question':'月別推移をグラフにして','execution_events
         self.assertEqual(len(app.get('vega_lite_chart')), 1)
         self.assertTrue(any('未取得' in c.value for c in app.caption))
 
+    def test_managed_table_request_displays_rows_before_execution_details(self):
+        from streamlit.testing.v1 import AppTest
+        source = '''
+import pandas as pd
+from app import render_results
+from src.bq_tools import QueryRun
+frame = pd.DataFrame({'company': [f'企業{i}' for i in range(12)], 'count': range(12)})
+events = [{'event':'analytics_call'},
+          {'event':'analytics_message','message':{'system_message':{'text':{'text_type':'FINAL_RESPONSE','parts':['一覧です。']}}}}]
+render_results({'question':'その12件を表で示してください。','execution_events':events,
+                'runs':[QueryRun('SELECT 1','SELECT 1',0,0,frame,{})]},0,set())
+'''
+        app = AppTest.from_string(source).run(timeout=20)
+        self.assertFalse(app.exception)
+        self.assertEqual(len(app.dataframe[0].value), 12)
+        self.assertIn('company', app.dataframe[0].value.columns)
+        self.assertNotIn('company', app.expander[0].dataframe[0].value.columns)
+
 
 if __name__ == '__main__':
     unittest.main()

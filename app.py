@@ -565,8 +565,8 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
     if not runs and not analyses and not events and not message.get("turn_id") and not message.get("errors"):
         return
     plan = choose_presentation(message.get("question", ""), runs, shown)
-    if analytics_messages:
-        # Managed charts are authoritative; do not guess a second chart with the old renderer.
+    if analytics_messages and plan.mode != 'table':
+        # Managed charts are authoritative; preserve explicitly requested tables.
         plan.mode = 'none'
     if message.get("is_error") or message.get("is_stopped"):
         plan.mode = "none"
@@ -604,6 +604,25 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
             st.caption("AI呼び出し時間は通信・再試行待機を含みます。再試行待機の行はAI呼び出し時間の内数です。空欄は未取得です。モデル内部の思考時間は取得できません。")
         if analytics_messages:
             st.caption('管理型分析APIの内部トークン量・AI費用は未取得です。0を意味しません。')
+            with st.expander('送信先・API呼び出し（実測）'):
+                for call in (e for e in events if e.get('event') == 'analytics_call'):
+                    labels = {'started_at': '開始日時', 'conversation': 'API会話ID', 'agent': 'データエージェントID',
+                              'continued': '既存API会話の継続', 'request_messages': '送信メッセージ数',
+                              'request_chars': '送信文字数', 'context_sha256': '登録コンテキストのSHA256',
+                              'prepare_seconds': '準備時間（秒）', 'chat_seconds': 'ストリーム受信時間（秒）',
+                              'job_lookup_seconds': 'ジョブ情報取得時間（秒）', 'seconds': '呼び出し全体時間（秒）',
+                              'stream_completed': 'ストリーム完了', 'status': '状態', 'exception': 'エラー'}
+                    st.json({label: call[key] for key, label in labels.items() if key in call}, expanded=False)
+            jobs = [e for e in events if e.get('event') == 'analytics_query_job']
+            if jobs:
+                with st.expander('BigQueryジョブ（取得済み情報）'):
+                    st.dataframe(pd.DataFrame([{
+                        'ジョブID': j.get('job', {}).get('job_id'), 'リージョン': j.get('job', {}).get('location'),
+                        '開始日時': j.get('started_at'), '終了日時': j.get('ended_at'), '実行秒': j.get('seconds'),
+                        '処理バイト数': j.get('processed_bytes'), '課金対象バイト数': j.get('billed_bytes'),
+                        'キャッシュヒット': j.get('cache_hit'), '過去ジョブ参照': j.get('reused_job', False),
+                    } for j in jobs]), hide_index=True)
+                    st.caption('取得できたジョブのみです。全実行ジョブの網羅は保証しません。空欄は未取得です。')
             sqls = []
             for system in analytics_messages:
                 candidates = [system.get('data', {}).get('generated_sql', '')]
@@ -631,7 +650,11 @@ def render_results(message: dict[str, Any], msg_idx: int, shown: set[str]) -> No
                 st.dataframe(pd.DataFrame(receipts), hide_index=True)
                 st.caption("元のツール結果と送信JSONを照合します。本文や認証ヘッダーはこの記録に保存しません。")
         summary = message.get("execution_summary") or {}
-        if summary:
+        if summary.get('analytics_context'):
+            with st.expander('登録した指示・テーブル定義・会話参照'):
+                st.json(summary['analytics_context'], expanded=False)
+                st.caption('アプリが登録した情報です。モデルが今回参照した内部入力や圧縮内容を表すものではありません。')
+        elif summary:
             with st.expander("引き継ぎ要約"):
                 if summary.get("execution_note"):
                     st.write("実行状態の要約", summary["execution_note"])
